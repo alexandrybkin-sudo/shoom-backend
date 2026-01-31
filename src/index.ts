@@ -46,11 +46,15 @@ function getOrCreateRoom(roomId: string): RoomState {
   return rooms[roomId];
 }
 
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 3001;
 const app = express();
 
 const allowedOrigin = process.env.FRONTEND_URL || "*";
-app.use(cors({ origin: allowedOrigin }));
+app.use(cors({ 
+  origin: "*", 
+  methods: ["GET", "POST"],
+  credentials: true 
+}));
 
 // --- API Routes ---
 
@@ -99,7 +103,11 @@ app.get('/api/token', async (req: Request, res: Response): Promise<void> => {
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: allowedOrigin, methods: ["GET", "POST"] }
+  cors: { 
+    origin: "*", 
+    methods: ["GET", "POST"],
+    credentials: true 
+  }
 });
 
 io.on('connection', (socket: Socket) => {
