@@ -192,6 +192,7 @@ io.on('connection', (socket: Socket) => {
 setInterval(() => {
   Object.keys(rooms).forEach(roomId => {
     const r = rooms[roomId];
+    if (!r) return;
     let changed = false;
 
     if (r.timeLeft > 0) {
