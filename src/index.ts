@@ -50,13 +50,31 @@ const PORT = process.env.PORT || 3001;
 const app = express();
 
 const allowedOrigin = process.env.FRONTEND_URL || "*";
-app.use(cors({ 
-  origin: "*", 
+app.use(cors({
+  origin: "*",
   methods: ["GET", "POST"],
-  credentials: true 
+  credentials: true
 }));
 
 // --- API Routes ---
+
+app.get('/api/rooms', (req, res) => {
+  const roomList = Object.keys(rooms)
+    .map(id => {
+      const r = rooms[id];
+      if (!r) return null;
+      return {
+        id,
+        phase: r.phase,
+        viewers: r.viewersCount,
+        title: id.replace(/-/g, ' ').toUpperCase(),
+      };
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null) // Убираем null
+    .filter(r => r.viewers > 0 || r.phase !== 'finished'); // Бизнес-логика
+
+  res.json(roomList);
+});
 
 app.get('/', (req, res) => {
   res.send('Shoom Backend is running 🚀');
@@ -103,17 +121,17 @@ app.get('/api/token', async (req: Request, res: Response): Promise<void> => {
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-  cors: { 
-    origin: "*", 
+  cors: {
+    origin: "*",
     methods: ["GET", "POST"],
-    credentials: true 
+    credentials: true
   }
 });
 
 io.on('connection', (socket: Socket) => {
   // Client MUST join a room explicitly
   const roomId = socket.handshake.query.roomId as string;
-  
+
   if (!roomId) {
     console.log(`❌ Client ${socket.id} connected without roomId`);
     socket.disconnect();
@@ -122,11 +140,11 @@ io.on('connection', (socket: Socket) => {
 
   console.log(`🔌 Client ${socket.id} joined room: ${roomId}`);
   socket.join(roomId);
-  
+
   // Get current state
   const room = getOrCreateRoom(roomId);
   room.viewersCount++;
-  
+
   // Send initial state ONLY to this user
   socket.emit('state_update', room);
   // Broadcast viewer count update to room
@@ -202,11 +220,11 @@ setInterval(() => {
 
     // Auto-transitions
     if (r.timeLeft === 0 && r.phase !== 'waiting' && r.phase !== 'voting' && r.phase !== 'finished') {
-       // Simple linear flow for MVP
-       if (r.phase === 'intro') { r.phase = 'roundA'; r.timeLeft = 45; r.activePlayer = 'A'; changed = true; }
-       else if (r.phase === 'roundA') { r.phase = 'roundB'; r.timeLeft = 45; r.activePlayer = 'B'; changed = true; }
-       else if (r.phase === 'roundB') { r.phase = 'ad'; r.timeLeft = 5; r.activePlayer = null; changed = true; }
-       else if (r.phase === 'ad') { r.phase = 'voting'; r.timeLeft = 0; r.activePlayer = null; changed = true; }
+      // Simple linear flow for MVP
+      if (r.phase === 'intro') { r.phase = 'roundA'; r.timeLeft = 45; r.activePlayer = 'A'; changed = true; }
+      else if (r.phase === 'roundA') { r.phase = 'roundB'; r.timeLeft = 45; r.activePlayer = 'B'; changed = true; }
+      else if (r.phase === 'roundB') { r.phase = 'ad'; r.timeLeft = 5; r.activePlayer = null; changed = true; }
+      else if (r.phase === 'ad') { r.phase = 'voting'; r.timeLeft = 0; r.activePlayer = null; changed = true; }
     }
 
     if (changed) {
