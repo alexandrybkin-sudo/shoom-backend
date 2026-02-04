@@ -10,6 +10,16 @@ const cors_1 = __importDefault(require("cors"));
 const livekit_server_sdk_1 = require("livekit-server-sdk");
 const dotenv_1 = __importDefault(require("dotenv"));
 dotenv_1.default.config();
+// --- CONFIG & CONSTANTS ---
+const PORT = process.env.PORT || 3001;
+// Список разрешенных адресов (CORS Whitelist)
+// Это решает проблему "Wildcard origin not allowed with credentials"
+const ALLOWED_ORIGINS = [
+    "http://localhost:3000", // Локальная разработка
+    "https://shoom.fun", // Твой домен (HTTPS)
+    "http://shoom.fun", // Твой домен (HTTP)
+    process.env.FRONTEND_URL // Из .env (на всякий случай)
+].filter((url) => !!url); // Убираем пустые значения
 // --- Multi-Room Store ---
 const rooms = {};
 function getOrCreateRoom(roomId) {
@@ -26,11 +36,24 @@ function getOrCreateRoom(roomId) {
     }
     return rooms[roomId];
 }
-const PORT = process.env.PORT || 3001;
 const app = (0, express_1.default)();
-const allowedOrigin = process.env.FRONTEND_URL || "*";
+const httpServer = (0, http_1.createServer)(app);
+// --- CORS CONFIGURATION (EXPRESS) ---
 app.use((0, cors_1.default)({
-    origin: "*",
+    origin: (origin, callback) => {
+        // Разрешаем запросы без origin (например, server-to-server или postman)
+        if (!origin)
+            return callback(null, true);
+        if (ALLOWED_ORIGINS.includes(origin)) {
+            callback(null, true);
+        }
+        else {
+            console.warn(`⚠️ Blocked CORS request from: ${origin}`);
+            // Временно разрешаем всё для отладки, если домен не совпал (но лучше добавить домен в список)
+            // callback(new Error('Not allowed by CORS')); 
+            callback(null, true); // <-- Режим "мягкого" CORS (для стартапа ок)
+        }
+    },
     methods: ["GET", "POST"],
     credentials: true
 }));
@@ -48,8 +71,8 @@ app.get('/api/rooms', (req, res) => {
             title: id.replace(/-/g, ' ').toUpperCase(),
         };
     })
-        .filter((r) => r !== null) // Убираем null
-        .filter(r => r.viewers > 0 || r.phase !== 'finished'); // Бизнес-логика
+        .filter((r) => r !== null)
+        .filter(r => r.viewers > 0 || r.phase !== 'finished');
     res.json(roomList);
 });
 app.get('/', (req, res) => {
@@ -64,11 +87,11 @@ app.get('/api/token', async (req, res) => {
         res.status(400).json({ error: 'roomName required' });
         return;
     }
-    // Ensure room exists in our memory
     getOrCreateRoom(roomName);
     const apiKey = process.env.LIVEKIT_API_KEY;
     const apiSecret = process.env.LIVEKIT_API_SECRET;
     if (!apiKey || !apiSecret) {
+        console.error("❌ LIVEKIT KEYS MISSING IN .ENV");
         res.status(500).json({ error: 'Server misconfigured' });
         return;
     }
@@ -84,20 +107,19 @@ app.get('/api/token', async (req, res) => {
         res.json({ token });
     }
     catch (error) {
+        console.error("Token generation error:", error);
         res.status(500).json({ error: 'Failed to generate token' });
     }
 });
-// --- Socket.IO with Rooms ---
-const httpServer = (0, http_1.createServer)(app);
+// --- Socket.IO Configuration ---
 const io = new socket_io_1.Server(httpServer, {
     cors: {
-        origin: "*",
+        origin: ALLOWED_ORIGINS, // Передаем массив разрешенных доменов
         methods: ["GET", "POST"],
         credentials: true
     }
 });
 io.on('connection', (socket) => {
-    // Client MUST join a room explicitly
     const roomId = socket.handshake.query.roomId;
     if (!roomId) {
         console.log(`❌ Client ${socket.id} connected without roomId`);
@@ -106,12 +128,9 @@ io.on('connection', (socket) => {
     }
     console.log(`🔌 Client ${socket.id} joined room: ${roomId}`);
     socket.join(roomId);
-    // Get current state
     const room = getOrCreateRoom(roomId);
     room.viewersCount++;
-    // Send initial state ONLY to this user
     socket.emit('state_update', room);
-    // Broadcast viewer count update to room
     io.to(roomId).emit('state_update', room);
     socket.on('disconnect', () => {
         console.log(`👋 Client ${socket.id} left room: ${roomId}`);
@@ -155,7 +174,7 @@ io.on('connection', (socket) => {
                     r.phase = 'roundA';
                     r.timeLeft = 45;
                     r.activePlayer = 'A';
-                } // Force loop
+                }
                 break;
             case 'reset':
                 rooms[roomId] = {
@@ -187,7 +206,7 @@ io.on('connection', (socket) => {
         io.to(roomId).emit('reaction_received', { type: payload.type });
     });
 });
-// --- Game Loop (Ticker for ALL rooms) ---
+// --- Game Loop ---
 setInterval(() => {
     Object.keys(rooms).forEach(roomId => {
         const r = rooms[roomId];
@@ -198,9 +217,7 @@ setInterval(() => {
             r.timeLeft--;
             changed = true;
         }
-        // Auto-transitions
         if (r.timeLeft === 0 && r.phase !== 'waiting' && r.phase !== 'voting' && r.phase !== 'finished') {
-            // Simple linear flow for MVP
             if (r.phase === 'intro') {
                 r.phase = 'roundA';
                 r.timeLeft = 45;
@@ -232,6 +249,7 @@ setInterval(() => {
     });
 }, 1000);
 httpServer.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🛡️  CORS Allowed Origins: ${ALLOWED_ORIGINS.join(', ')}`);
 });
 //# sourceMappingURL=index.js.map

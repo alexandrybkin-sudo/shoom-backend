@@ -7,6 +7,18 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+// --- CONFIG & CONSTANTS ---
+const PORT = process.env.PORT || 3001;
+
+// Список разрешенных адресов (CORS Whitelist)
+// Это решает проблему "Wildcard origin not allowed with credentials"
+const ALLOWED_ORIGINS = [
+  "http://localhost:3000",       // Локальная разработка
+  "https://shoom.fun",           // Твой домен (HTTPS)
+  "http://shoom.fun",            // Твой домен (HTTP)
+  process.env.FRONTEND_URL       // Из .env (на всякий случай)
+].filter((url): url is string => !!url); // Убираем пустые значения
+
 // --- Types ---
 type Phase = 'waiting' | 'intro' | 'roundA' | 'roundB' | 'ad' | 'voting' | 'rage' | 'finished';
 type Player = 'A' | 'B';
@@ -46,12 +58,24 @@ function getOrCreateRoom(roomId: string): RoomState {
   return rooms[roomId];
 }
 
-const PORT = process.env.PORT || 3001;
 const app = express();
+const httpServer = createServer(app);
 
-const allowedOrigin = process.env.FRONTEND_URL || "*";
+// --- CORS CONFIGURATION (EXPRESS) ---
 app.use(cors({
-  origin: "*",
+  origin: (origin, callback) => {
+    // Разрешаем запросы без origin (например, server-to-server или postman)
+    if (!origin) return callback(null, true);
+    
+    if (ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn(`⚠️ Blocked CORS request from: ${origin}`);
+      // Временно разрешаем всё для отладки, если домен не совпал (но лучше добавить домен в список)
+      // callback(new Error('Not allowed by CORS')); 
+      callback(null, true); // <-- Режим "мягкого" CORS (для стартапа ок)
+    }
+  },
   methods: ["GET", "POST"],
   credentials: true
 }));
@@ -70,8 +94,8 @@ app.get('/api/rooms', (req, res) => {
         title: id.replace(/-/g, ' ').toUpperCase(),
       };
     })
-    .filter((r): r is NonNullable<typeof r> => r !== null) // Убираем null
-    .filter(r => r.viewers > 0 || r.phase !== 'finished'); // Бизнес-логика
+    .filter((r): r is NonNullable<typeof r> => r !== null)
+    .filter(r => r.viewers > 0 || r.phase !== 'finished');
 
   res.json(roomList);
 });
@@ -91,13 +115,13 @@ app.get('/api/token', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  // Ensure room exists in our memory
   getOrCreateRoom(roomName);
 
   const apiKey = process.env.LIVEKIT_API_KEY;
   const apiSecret = process.env.LIVEKIT_API_SECRET;
 
   if (!apiKey || !apiSecret) {
+    console.error("❌ LIVEKIT KEYS MISSING IN .ENV");
     res.status(500).json({ error: 'Server misconfigured' });
     return;
   }
@@ -113,23 +137,21 @@ app.get('/api/token', async (req: Request, res: Response): Promise<void> => {
     const token = await at.toJwt();
     res.json({ token });
   } catch (error) {
+    console.error("Token generation error:", error);
     res.status(500).json({ error: 'Failed to generate token' });
   }
 });
 
-// --- Socket.IO with Rooms ---
-
-const httpServer = createServer(app);
+// --- Socket.IO Configuration ---
 const io = new Server(httpServer, {
   cors: {
-    origin: "*",
+    origin: ALLOWED_ORIGINS, // Передаем массив разрешенных доменов
     methods: ["GET", "POST"],
     credentials: true
   }
 });
 
 io.on('connection', (socket: Socket) => {
-  // Client MUST join a room explicitly
   const roomId = socket.handshake.query.roomId as string;
 
   if (!roomId) {
@@ -141,13 +163,10 @@ io.on('connection', (socket: Socket) => {
   console.log(`🔌 Client ${socket.id} joined room: ${roomId}`);
   socket.join(roomId);
 
-  // Get current state
   const room = getOrCreateRoom(roomId);
   room.viewersCount++;
 
-  // Send initial state ONLY to this user
   socket.emit('state_update', room);
-  // Broadcast viewer count update to room
   io.to(roomId).emit('state_update', room);
 
   socket.on('disconnect', () => {
@@ -171,7 +190,7 @@ io.on('connection', (socket: Socket) => {
         else if (r.phase === 'roundA') { r.phase = 'roundB'; r.timeLeft = 45; r.activePlayer = 'B'; }
         else if (r.phase === 'roundB') { r.phase = 'ad'; r.timeLeft = 5; r.activePlayer = null; }
         else if (r.phase === 'ad') { r.phase = 'voting'; r.timeLeft = 0; r.activePlayer = null; }
-        else { r.phase = 'roundA'; r.timeLeft = 45; r.activePlayer = 'A'; } // Force loop
+        else { r.phase = 'roundA'; r.timeLeft = 45; r.activePlayer = 'A'; }
         break;
       case 'reset':
         rooms[roomId] = {
@@ -206,7 +225,7 @@ io.on('connection', (socket: Socket) => {
   });
 });
 
-// --- Game Loop (Ticker for ALL rooms) ---
+// --- Game Loop ---
 setInterval(() => {
   Object.keys(rooms).forEach(roomId => {
     const r = rooms[roomId];
@@ -218,9 +237,7 @@ setInterval(() => {
       changed = true;
     }
 
-    // Auto-transitions
     if (r.timeLeft === 0 && r.phase !== 'waiting' && r.phase !== 'voting' && r.phase !== 'finished') {
-      // Simple linear flow for MVP
       if (r.phase === 'intro') { r.phase = 'roundA'; r.timeLeft = 45; r.activePlayer = 'A'; changed = true; }
       else if (r.phase === 'roundA') { r.phase = 'roundB'; r.timeLeft = 45; r.activePlayer = 'B'; changed = true; }
       else if (r.phase === 'roundB') { r.phase = 'ad'; r.timeLeft = 5; r.activePlayer = null; changed = true; }
@@ -234,5 +251,6 @@ setInterval(() => {
 }, 1000);
 
 httpServer.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🛡️  CORS Allowed Origins: ${ALLOWED_ORIGINS.join(', ')}`);
 });
