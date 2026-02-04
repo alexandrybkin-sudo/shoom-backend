@@ -35,6 +35,23 @@ app.use((0, cors_1.default)({
     credentials: true
 }));
 // --- API Routes ---
+app.get('/api/rooms', (req, res) => {
+    const roomList = Object.keys(rooms)
+        .map(id => {
+        const r = rooms[id];
+        if (!r)
+            return null;
+        return {
+            id,
+            phase: r.phase,
+            viewers: r.viewersCount,
+            title: id.replace(/-/g, ' ').toUpperCase(),
+        };
+    })
+        .filter((r) => r !== null) // Убираем null
+        .filter(r => r.viewers > 0 || r.phase !== 'finished'); // Бизнес-логика
+    res.json(roomList);
+});
 app.get('/', (req, res) => {
     res.send('Shoom Backend is running 🚀');
 });
@@ -174,6 +191,8 @@ io.on('connection', (socket) => {
 setInterval(() => {
     Object.keys(rooms).forEach(roomId => {
         const r = rooms[roomId];
+        if (!r)
+            return;
         let changed = false;
         if (r.timeLeft > 0) {
             r.timeLeft--;
