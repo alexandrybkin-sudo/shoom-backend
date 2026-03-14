@@ -334,15 +334,32 @@ io.on('connection', (socket: Socket) => {
         r.phase = 'intro'; r.timeLeft = 15; r.activePlayer = null;
         break;
       case 'next_round':
-        if (r.phase === 'intro') { r.phase = 'roundA'; r.timeLeft = 45; r.activePlayer = 'A'; }
-        else if (r.phase === 'roundA') { r.phase = 'roundB'; r.timeLeft = 45; r.activePlayer = 'B'; }
-        else if (r.phase === 'roundB') { r.phase = 'ad'; r.timeLeft = 5; r.activePlayer = null; }
+        if (r.phase === 'intro') {
+          r.phase = 'round'; r.currentRound = 1; r.timeLeft = r.roundDuration; r.activePlayer = 'A';
+        }
+        else if (r.phase === 'round') {
+          if (r.currentRound < r.roundsCount) {
+            r.currentRound++;
+            r.timeLeft = r.roundDuration;
+            r.activePlayer = r.currentRound % 2 === 1 ? 'A' : 'B';
+          } else {
+            r.phase = 'ad'; r.timeLeft = 5; r.activePlayer = null;
+          }
+        }
         else if (r.phase === 'ad') { r.phase = 'voting'; r.timeLeft = 0; r.activePlayer = null; }
-        else { r.phase = 'roundA'; r.timeLeft = 45; r.activePlayer = 'A'; }
+        else { r.phase = 'round'; r.currentRound = 1; r.timeLeft = r.roundDuration; r.activePlayer = 'A'; }
         break;
       case 'reset':
         rooms[roomId] = {
-          phase: 'waiting', timeLeft: 0, activePlayer: null, viewersCount: r.viewersCount, chatMessages: [], donations: []
+          ...r,
+          phase: 'waiting',
+          timeLeft: 0,
+          activePlayer: null,
+          viewersCount: r.viewersCount,
+          chatMessages: [],
+          donations: [],
+          currentRound: 0,
+          extraRoundsRequested: { A: false, B: false }
         };
         break;
     }
