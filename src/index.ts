@@ -20,7 +20,7 @@ const ALLOWED_ORIGINS = [
 ].filter((url): url is string => !!url); // Убираем пустые значения
 
 // --- Types ---
-type Phase = 'waiting' | 'intro' | 'roundA' | 'roundB' | 'ad' | 'voting' | 'rage' | 'finished';
+type Phase = 'waiting' | 'intro' | 'round' | 'ad' | 'voting' | 'finished';
 type Player = 'A' | 'B';
 
 interface ChatMessage {
@@ -38,12 +38,30 @@ interface RoomState {
   viewersCount: number;
   chatMessages: ChatMessage[];
   donations: { user: string; amount: number }[];
+  topic: string;
+  labelA: string;
+  labelB: string;
+  debaterA: string | null;
+  debaterB: string | null;
+  debaterAOnline: boolean;
+  debaterBOnline: boolean;
+  roundsCount: number;
+  roundDuration: number;
+  currentRound: number;
+  extraRoundsRequested: { A: boolean; B: boolean };
 }
 
 // --- Multi-Room Store ---
 const rooms: Record<string, RoomState> = {};
 
-function getOrCreateRoom(roomId: string): RoomState {
+function getOrCreateRoom(
+  roomId: string,
+  topic = '',
+  labelA = 'Red',
+  labelB = 'Blue',
+  roundsCount = 2,
+  roundDuration = 45
+): RoomState {
   if (!rooms[roomId]) {
     rooms[roomId] = {
       phase: 'waiting',
@@ -51,9 +69,29 @@ function getOrCreateRoom(roomId: string): RoomState {
       activePlayer: null,
       viewersCount: 0,
       chatMessages: [],
-      donations: []
+      donations: [],
+      topic,
+      labelA,
+      labelB,
+      debaterA: null,
+      debaterB: null,
+      debaterAOnline: false,
+      debaterBOnline: false,
+      roundsCount,
+      roundDuration,
+      currentRound: 0,
+      extraRoundsRequested: { A: false, B: false },
     };
     console.log(`🏠 Created new room: ${roomId}`);
+
+    // Таймаут 30 секунд — удаляем комнату если никто не подключился
+    setTimeout(() => {
+      const r = rooms[roomId];
+      if (r && !r.debaterAOnline && r.viewersCount === 0) {
+        delete rooms[roomId];
+        console.log(`🗑️ Room ${roomId} deleted (timeout, no one joined)`);
+      }
+    }, 30000);
   }
   return rooms[roomId];
 }
@@ -80,6 +118,8 @@ app.use(cors({
   credentials: true
 }));
 
+app.use(express.json());
+
 // --- API Routes ---
 
 app.get('/api/rooms', (req, res) => {
@@ -91,13 +131,90 @@ app.get('/api/rooms', (req, res) => {
         id,
         phase: r.phase,
         viewers: r.viewersCount,
-        title: id.replace(/-/g, ' ').toUpperCase(),
+        topic: r.topic || id.replace(/-/g, ' '),
+        labelA: r.labelA || 'Red',
+        labelB: r.labelB || 'Blue',
+        hasDebaterA: !!r.debaterA,
+        hasDebaterB: !!r.debaterB,
+        isOpen: !!r.debaterA && !r.debaterB,
+        isLive: !!r.debaterA && !!r.debaterB && r.phase !== 'finished',
       };
     })
     .filter((r): r is NonNullable<typeof r> => r !== null)
-    .filter(r => r.viewers > 0 || r.phase !== 'finished');
+    .filter(r => r.isOpen || r.isLive);
 
   res.json(roomList);
+});
+
+app.post('/api/rooms', (req, res) => {
+  const { topic, labelA, labelB, roundsCount, roundDuration } = req.body;
+  if (!topic) {
+    res.status(400).json({ error: 'topic is required' });
+    return;
+  }
+
+  let baseId = topic
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .trim()
+    .replace(/\s+/g, '-')
+    .substring(0, 50);
+
+  // Если roomId занят — добавляем суффикс
+  let roomId = baseId;
+  let counter = 2;
+  while (rooms[roomId]) {
+    roomId = `${baseId}-${counter}`;
+    counter++;
+  }
+
+  getOrCreateRoom(
+    roomId,
+    topic,
+    labelA || 'Red',
+    labelB || 'Blue',
+    roundsCount || 2,
+    roundDuration || 45
+  );
+
+  res.json({ roomId });
+});
+
+app.post('/api/rooms/:roomId/join', (req, res) => {
+  const { roomId } = req.params;
+  const { identity } = req.body;
+
+  if (!identity) {
+    res.status(400).json({ error: 'identity is required' });
+    return;
+  }
+
+  const room = rooms[roomId];
+  if (!room) {
+    res.status(404).json({ error: 'room not found' });
+    return;
+  }
+
+  if (room.debaterA === identity) {
+    res.json({ role: 'debater', slot: 'A' });
+    return;
+  }
+  if (room.debaterB === identity) {
+    res.json({ role: 'debater', slot: 'B' });
+    return;
+  }
+  if (!room.debaterA) {
+    room.debaterA = identity;
+    res.json({ role: 'debater', slot: 'A' });
+    return;
+  }
+  if (!room.debaterB) {
+    room.debaterB = identity;
+    res.json({ role: 'debater', slot: 'B' });
+    return;
+  }
+
+  res.json({ role: 'viewer', slot: null });
 });
 
 app.get('/', (req, res) => {
@@ -166,6 +283,29 @@ io.on('connection', (socket: Socket) => {
   const room = getOrCreateRoom(roomId);
   room.viewersCount++;
 
+  // Отмечаем дебатера онлайн
+  const identity = socket.handshake.query.identity as string;
+  if (identity && room.debaterA === identity) {
+    room.debaterAOnline = true;
+    console.log(`🎤 Debater A online in room ${roomId}`);
+  }
+  if (identity && room.debaterB === identity) {
+    room.debaterBOnline = true;
+    console.log(`🎤 Debater B online in room ${roomId}`);
+  }
+
+  // Автостарт если оба дебатера онлайн
+  if (
+    room.debaterAOnline &&
+    room.debaterBOnline &&
+    room.phase === 'waiting'
+  ) {
+    room.phase = 'intro';
+    room.timeLeft = 15;
+    console.log(`🚀 Auto-start room ${roomId}`);
+    io.to(roomId).emit('state_update', room);
+  }
+
   socket.emit('state_update', room);
   io.to(roomId).emit('state_update', room);
 
@@ -173,6 +313,14 @@ io.on('connection', (socket: Socket) => {
     console.log(`👋 Client ${socket.id} left room: ${roomId}`);
     if (rooms[roomId] && rooms[roomId].viewersCount > 0) {
       rooms[roomId].viewersCount--;
+      
+      if (identity && rooms[roomId]?.debaterA === identity) {
+        rooms[roomId].debaterAOnline = false;
+      }
+      if (identity && rooms[roomId]?.debaterB === identity) {
+        rooms[roomId].debaterBOnline = false;
+      }
+
       io.to(roomId).emit('state_update', rooms[roomId]);
     }
   });
@@ -223,6 +371,26 @@ io.on('connection', (socket: Socket) => {
   socket.on('send_reaction', (payload) => {
     io.to(roomId).emit('reaction_received', { type: payload.type });
   });
+
+  socket.on('request_extra_rounds', () => {
+    const r = rooms[roomId];
+    if (!r) return;
+
+    const identity = socket.handshake.query.identity as string;
+    if (r.debaterA === identity) r.extraRoundsRequested.A = true;
+    if (r.debaterB === identity) r.extraRoundsRequested.B = true;
+
+    // Оба нажали — добавляем 2 раунда
+    if (r.extraRoundsRequested.A && r.extraRoundsRequested.B) {
+      r.roundsCount += 2;
+      r.extraRoundsRequested = { A: false, B: false };
+      console.log(`➕ Extra rounds added in room ${roomId}, total: ${r.roundsCount}`);
+      io.to(roomId).emit('state_update', r);
+    } else {
+      // Сообщаем всем что один из дебатеров запросил доп раунды
+      io.to(roomId).emit('state_update', r);
+    }
+  });
 });
 
 // --- Game Loop ---
@@ -238,10 +406,30 @@ setInterval(() => {
     }
 
     if (r.timeLeft === 0 && r.phase !== 'waiting' && r.phase !== 'voting' && r.phase !== 'finished') {
-      if (r.phase === 'intro') { r.phase = 'roundA'; r.timeLeft = 45; r.activePlayer = 'A'; changed = true; }
-      else if (r.phase === 'roundA') { r.phase = 'roundB'; r.timeLeft = 45; r.activePlayer = 'B'; changed = true; }
-      else if (r.phase === 'roundB') { r.phase = 'ad'; r.timeLeft = 5; r.activePlayer = null; changed = true; }
-      else if (r.phase === 'ad') { r.phase = 'voting'; r.timeLeft = 0; r.activePlayer = null; changed = true; }
+      if (r.phase === 'intro') {
+        r.phase = 'round';
+        r.currentRound = 1;
+        r.timeLeft = r.roundDuration;
+        r.activePlayer = r.currentRound % 2 === 1 ? 'A' : 'B';
+        changed = true;
+      } else if (r.phase === 'round') {
+        if (r.currentRound < r.roundsCount) {
+          r.currentRound++;
+          r.timeLeft = r.roundDuration;
+          r.activePlayer = r.currentRound % 2 === 1 ? 'A' : 'B';
+          changed = true;
+        } else {
+          r.phase = 'ad';
+          r.timeLeft = 5;
+          r.activePlayer = null;
+          changed = true;
+        }
+      } else if (r.phase === 'ad') {
+        r.phase = 'voting';
+        r.timeLeft = 0;
+        r.activePlayer = null;
+        changed = true;
+      }
     }
 
     if (changed) {
