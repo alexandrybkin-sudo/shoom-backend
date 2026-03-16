@@ -13,9 +13,23 @@ services:
     restart: always
   backend:
     build:
-      context: .       # Собираем прямо здесь
+      context: .
     env_file:
       - /opt/shoom/backend/.env
     ports:
       - "3001:3001"
     restart: always
+  nginx:
+    image: nginx:latest
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /opt/shoom/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/lib/letsencrypt:/var/lib/letsencrypt:ro
+    depends_on:
+      - frontend
+      - backend
+    restart: always
+    network_mode: host
