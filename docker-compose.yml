@@ -2,12 +2,12 @@ version: '3.8'
 services:
   frontend:
     build:
-      context: ../shoom  # Выходим из backend и заходим в shoom
+      context: /opt/shoom/frontend
       args:
         NEXT_PUBLIC_LIVEKIT_URL: wss://livekit.shoom.fun
         NEXT_PUBLIC_SOCKET_URL: https://shoom.fun
     env_file:
-      - ../shoom/.env
+      - /opt/shoom/frontend/.env
     ports:
       - "3000:3000"
     restart: always
