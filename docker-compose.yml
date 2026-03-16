@@ -4,7 +4,7 @@ services:
     build:
       context: /opt/shoom/frontend
       args:
-        NEXT_PUBLIC_LIVEKIT_URL: wss://livekit.shoom.fun
+        NEXT_PUBLIC_LIVEKIT_URL: wss://shoom.fun
         NEXT_PUBLIC_SOCKET_URL: https://shoom.fun
     env_file:
       - /opt/shoom/frontend/.env
