@@ -15,7 +15,7 @@ services:
     build:
       context: .       # Собираем прямо здесь
     env_file:
-      - .env
+      - /opt/shoom/backend/.env
     ports:
       - "3001:3001"
     restart: always
