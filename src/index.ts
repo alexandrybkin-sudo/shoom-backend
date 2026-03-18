@@ -96,6 +96,22 @@ function getOrCreateRoom(
   return rooms[roomId];
 }
 
+function cleanupRoomIfEmpty(roomId: string) {
+  const room = rooms[roomId];
+  if (!room) return;
+
+  // Адаптировано под текущий интерфейс RoomState (в нем нет массивов debaters/viewers/participants)
+  const debatersCount = (room.debaterAOnline ? 1 : 0) + (room.debaterBOnline ? 1 : 0);
+  const viewersCount = room.viewersCount || 0;
+
+  const total = debatersCount + viewersCount;
+
+  if (total === 0) {
+    delete rooms[roomId];
+    console.log(`🗑️ Room ${roomId} deleted (empty)`);
+  }
+}
+
 const app = express();
 const httpServer = createServer(app);
 
@@ -123,6 +139,8 @@ app.use(express.json());
 // --- API Routes ---
 
 app.get('/api/rooms', (req, res) => {
+  Object.keys(rooms).forEach((roomId) => cleanupRoomIfEmpty(roomId));
+
   const roomList = Object.keys(rooms)
     .map(id => {
       const r = rooms[id];
@@ -311,17 +329,22 @@ io.on('connection', (socket: Socket) => {
 
   socket.on('disconnect', () => {
     console.log(`👋 Client ${socket.id} left room: ${roomId}`);
-    if (rooms[roomId] && rooms[roomId].viewersCount > 0) {
-      rooms[roomId].viewersCount--;
+    if (rooms[roomId]) {
+      if (rooms[roomId].viewersCount > 0) {
+        rooms[roomId].viewersCount--;
+      }
       
-      if (identity && rooms[roomId]?.debaterA === identity) {
+      if (identity && rooms[roomId].debaterA === identity) {
         rooms[roomId].debaterAOnline = false;
       }
-      if (identity && rooms[roomId]?.debaterB === identity) {
+      if (identity && rooms[roomId].debaterB === identity) {
         rooms[roomId].debaterBOnline = false;
       }
 
       io.to(roomId).emit('state_update', rooms[roomId]);
+      
+      cleanupRoomIfEmpty(roomId);
+      io.emit('rooms-updated', Object.values(rooms));
     }
   });
 
@@ -454,6 +477,10 @@ setInterval(() => {
     }
   });
 }, 1000);
+
+setInterval(() => {
+  Object.keys(rooms).forEach((roomId) => cleanupRoomIfEmpty(roomId));
+}, 15000);
 
 httpServer.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
