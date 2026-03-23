@@ -2,7 +2,7 @@ import express, { Request, Response } from 'express';
 import { createServer } from 'http';
 import { Server, Socket } from 'socket.io';
 import cors from 'cors';
-import { AccessToken } from 'livekit-server-sdk';
+import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -20,7 +20,7 @@ const ALLOWED_ORIGINS = [
 ].filter((url): url is string => !!url); // Убираем пустые значения
 
 // --- Types ---
-type Phase = 'waiting' | 'intro' | 'round' | 'ad' | 'voting' | 'finished';
+type Phase = 'waiting' | 'round' | 'rageRound' | 'finished';
 type Player = 'A' | 'B';
 
 interface ChatMessage {
@@ -33,8 +33,13 @@ interface ChatMessage {
 
 interface RoomState {
   phase: Phase;
+  currentRound: number;
+  roundsTotal: number;
+  activeSpeaker: Player | null;
+  rageRoundEndsAt: number | null;
+  roundEndsAt: number | null;
+  
   timeLeft: number;
-  activePlayer: Player | null;
   viewersCount: number;
   chatMessages: ChatMessage[];
   donations: { user: string; amount: number }[];
@@ -45,9 +50,7 @@ interface RoomState {
   debaterB: string | null;
   debaterAOnline: boolean;
   debaterBOnline: boolean;
-  roundsCount: number;
   roundDuration: number;
-  currentRound: number;
   extraRoundsRequested: { A: boolean; B: boolean };
 }
 
@@ -65,8 +68,12 @@ function getOrCreateRoom(
   if (!rooms[roomId]) {
     rooms[roomId] = {
       phase: 'waiting',
+      currentRound: 0,
+      roundsTotal: roundsCount,
+      activeSpeaker: null,
+      rageRoundEndsAt: null,
+      roundEndsAt: null,
       timeLeft: 0,
-      activePlayer: null,
       viewersCount: 0,
       chatMessages: [],
       donations: [],
@@ -77,9 +84,7 @@ function getOrCreateRoom(
       debaterB: null,
       debaterAOnline: false,
       debaterBOnline: false,
-      roundsCount,
       roundDuration,
-      currentRound: 0,
       extraRoundsRequested: { A: false, B: false },
     };
     console.log(`🏠 Created new room: ${roomId}`);
@@ -286,6 +291,38 @@ const io = new Server(httpServer, {
   }
 });
 
+async function updateLiveKitPermissions(roomId: string, r: RoomState) {
+  const apiKey = process.env.LIVEKIT_API_KEY;
+  const apiSecret = process.env.LIVEKIT_API_SECRET;
+  const livekitUrl = process.env.LIVEKIT_URL || 'https://shoom.fun';
+  
+  if (!apiKey || !apiSecret) return;
+
+  try {
+    const roomService = new RoomServiceClient(livekitUrl, apiKey, apiSecret);
+    
+    const canPublishA = r.phase === 'rageRound' || (r.phase === 'round' && r.activeSpeaker === 'A');
+    const canPublishB = r.phase === 'rageRound' || (r.phase === 'round' && r.activeSpeaker === 'B');
+
+    if (r.debaterA) {
+      await roomService.updateParticipant(roomId, r.debaterA, undefined, {
+        canPublish: canPublishA,
+        canSubscribe: true,
+        canPublishData: true,
+      });
+    }
+    if (r.debaterB) {
+      await roomService.updateParticipant(roomId, r.debaterB, undefined, {
+        canPublish: canPublishB,
+        canSubscribe: true,
+        canPublishData: true,
+      });
+    }
+  } catch (e) {
+    console.error(`Failed to update LiveKit permissions for room ${roomId}:`, e);
+  }
+}
+
 io.on('connection', (socket: Socket) => {
   const roomId = socket.handshake.query.roomId as string;
 
@@ -318,10 +355,14 @@ io.on('connection', (socket: Socket) => {
     room.debaterBOnline &&
     room.phase === 'waiting'
   ) {
-    room.phase = 'intro';
-    room.timeLeft = 15;
+    room.phase = 'round';
+    room.currentRound = 1;
+    room.activeSpeaker = 'A';
+    room.roundEndsAt = Date.now() + room.roundDuration * 1000;
     console.log(`🚀 Auto-start room ${roomId}`);
     io.to(roomId).emit('state_update', room);
+    io.to(roomId).emit('debate-state-updated', room);
+    updateLiveKitPermissions(roomId, room);
   }
 
   socket.emit('state_update', room);
@@ -354,39 +395,53 @@ io.on('connection', (socket: Socket) => {
 
     switch (payload.action) {
       case 'start':
-        r.phase = 'intro'; r.timeLeft = 15; r.activePlayer = null;
+        r.phase = 'round';
+        r.currentRound = 1;
+        r.activeSpeaker = 'A';
+        r.roundEndsAt = Date.now() + r.roundDuration * 1000;
         break;
       case 'next_round':
-        if (r.phase === 'intro') {
-          r.phase = 'round'; r.currentRound = 1; r.timeLeft = r.roundDuration; r.activePlayer = 'A';
-        }
-        else if (r.phase === 'round') {
-          if (r.currentRound < r.roundsCount) {
-            r.currentRound++;
-            r.timeLeft = r.roundDuration;
-            r.activePlayer = r.currentRound % 2 === 1 ? 'A' : 'B';
+        if (r.phase === 'round') {
+          if (r.currentRound >= r.roundsTotal && r.activeSpeaker === 'B') {
+            r.phase = 'rageRound';
+            r.rageRoundEndsAt = Date.now() + 120000;
+            r.activeSpeaker = null;
           } else {
-            r.phase = 'ad'; r.timeLeft = 5; r.activePlayer = null;
+            if (r.activeSpeaker === 'B') {
+              r.currentRound++;
+            }
+            r.activeSpeaker = r.activeSpeaker === 'A' ? 'B' : 'A';
+            r.roundEndsAt = Date.now() + r.roundDuration * 1000;
           }
+        } else if (r.phase === 'rageRound') {
+          r.phase = 'finished';
+          r.activeSpeaker = null;
+        } else {
+          r.phase = 'round';
+          r.currentRound = 1;
+          r.activeSpeaker = 'A';
+          r.roundEndsAt = Date.now() + r.roundDuration * 1000;
         }
-        else if (r.phase === 'ad') { r.phase = 'voting'; r.timeLeft = 0; r.activePlayer = null; }
-        else { r.phase = 'round'; r.currentRound = 1; r.timeLeft = r.roundDuration; r.activePlayer = 'A'; }
         break;
       case 'reset':
         rooms[roomId] = {
           ...r,
           phase: 'waiting',
+          currentRound: 0,
+          activeSpeaker: null,
+          rageRoundEndsAt: null,
+          roundEndsAt: null,
           timeLeft: 0,
-          activePlayer: null,
           viewersCount: r.viewersCount,
           chatMessages: [],
           donations: [],
-          currentRound: 0,
           extraRoundsRequested: { A: false, B: false }
         };
         break;
     }
     io.to(roomId).emit('state_update', rooms[roomId]);
+    io.to(roomId).emit('debate-state-updated', rooms[roomId]);
+    updateLiveKitPermissions(roomId, rooms[roomId]);
   });
 
   socket.on('send_message', (payload) => {
@@ -422,10 +477,11 @@ io.on('connection', (socket: Socket) => {
 
     // Оба нажали — добавляем 2 раунда
     if (r.extraRoundsRequested.A && r.extraRoundsRequested.B) {
-      r.roundsCount += 2;
+      r.roundsTotal += 2;
       r.extraRoundsRequested = { A: false, B: false };
-      console.log(`➕ Extra rounds added in room ${roomId}, total: ${r.roundsCount}`);
+      console.log(`➕ Extra rounds added in room ${roomId}, total: ${r.roundsTotal}`);
       io.to(roomId).emit('state_update', r);
+      io.to(roomId).emit('debate-state-updated', r);
     } else {
       // Сообщаем всем что один из дебатеров запросил доп раунды
       io.to(roomId).emit('state_update', r);
@@ -435,45 +491,50 @@ io.on('connection', (socket: Socket) => {
 
 // --- Game Loop ---
 setInterval(() => {
+  const now = Date.now();
   Object.keys(rooms).forEach(roomId => {
     const r = rooms[roomId];
     if (!r) return;
     let changed = false;
 
-    if (r.timeLeft > 0) {
-      r.timeLeft--;
+    if (r.phase === 'round' && r.roundEndsAt && now >= r.roundEndsAt) {
+      if (r.currentRound >= r.roundsTotal && r.activeSpeaker === 'B') {
+        r.phase = 'rageRound';
+        r.rageRoundEndsAt = now + 120000;
+        r.activeSpeaker = null;
+      } else {
+        if (r.activeSpeaker === 'B') {
+          r.currentRound++;
+        }
+        r.activeSpeaker = r.activeSpeaker === 'A' ? 'B' : 'A';
+        r.roundEndsAt = now + r.roundDuration * 1000;
+      }
+      changed = true;
+    } else if (r.phase === 'rageRound' && r.rageRoundEndsAt && now >= r.rageRoundEndsAt) {
+      r.phase = 'finished';
+      r.activeSpeaker = null;
       changed = true;
     }
 
-    if (r.timeLeft === 0 && r.phase !== 'waiting' && r.phase !== 'voting' && r.phase !== 'finished') {
-      if (r.phase === 'intro') {
-        r.phase = 'round';
-        r.currentRound = 1;
-        r.timeLeft = r.roundDuration;
-        r.activePlayer = r.currentRound % 2 === 1 ? 'A' : 'B';
-        changed = true;
-      } else if (r.phase === 'round') {
-        if (r.currentRound < r.roundsCount) {
-          r.currentRound++;
-          r.timeLeft = r.roundDuration;
-          r.activePlayer = r.currentRound % 2 === 1 ? 'A' : 'B';
-          changed = true;
-        } else {
-          r.phase = 'ad';
-          r.timeLeft = 5;
-          r.activePlayer = null;
-          changed = true;
-        }
-      } else if (r.phase === 'ad') {
-        r.phase = 'voting';
-        r.timeLeft = 0;
-        r.activePlayer = null;
-        changed = true;
-      }
+    // Update timeLeft for UI backward compatibility
+    let newTimeLeft = 0;
+    if (r.phase === 'round' && r.roundEndsAt) {
+      newTimeLeft = Math.max(0, Math.ceil((r.roundEndsAt - now) / 1000));
+    } else if (r.phase === 'rageRound' && r.rageRoundEndsAt) {
+      newTimeLeft = Math.max(0, Math.ceil((r.rageRoundEndsAt - now) / 1000));
+    }
+    
+    if (r.timeLeft !== newTimeLeft) {
+      r.timeLeft = newTimeLeft;
+      // We don't set changed = true here so we don't trigger debate-state-updated every second,
+      // but we still emit state_update
+      io.to(roomId).emit('state_update', r);
     }
 
     if (changed) {
       io.to(roomId).emit('state_update', r);
+      io.to(roomId).emit('debate-state-updated', r);
+      updateLiveKitPermissions(roomId, r);
     }
   });
 }, 1000);
