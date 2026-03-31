@@ -323,6 +323,48 @@ async function updateLiveKitPermissions(roomId: string, r: RoomState) {
   }
 }
 
+async function updateAudioTracks(roomId: string, activeSpeaker: string | null, phase: string) {
+  const roomState = rooms[roomId];
+  if (!roomState) return;
+
+  const apiKey = process.env.LIVEKIT_API_KEY;
+  const apiSecret = process.env.LIVEKIT_API_SECRET;
+  const livekitUrl = process.env.LIVEKIT_URL || 'https://shoom.fun';
+  
+  if (!apiKey || !apiSecret) return;
+
+  try {
+    const roomService = new RoomServiceClient(livekitUrl, apiKey, apiSecret);
+    // Получаем всех участников комнаты через LiveKit API
+    const participants = await roomService.listParticipants(roomId);
+    
+    for (const p of participants) {
+      // Находим только аудио треки участника
+      const audioTracks = p.tracks.filter(t => t.type === 1); // 1 = AUDIO (в LiveKit API)
+
+      for (const track of audioTracks) {
+        // Если сейчас rageRound -> все могут говорить (размьючиваем)
+        if (phase === 'rageRound') {
+          await roomService.mutePublishedTrack(roomId, p.identity, track.sid, false);
+        } 
+        // Если обычный раунд -> говорим только если identity совпадает со слотом активного спикера
+        else if (phase === 'round') {
+          const isMyTurn = 
+            (activeSpeaker === 'A' && roomState.debaterA === p.identity) || 
+            (activeSpeaker === 'B' && roomState.debaterB === p.identity);
+          await roomService.mutePublishedTrack(roomId, p.identity, track.sid, !isMyTurn);
+        }
+        // В других фазах (ожидание, финиш) -> мьютим
+        else {
+          await roomService.mutePublishedTrack(roomId, p.identity, track.sid, true);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error updating audio tracks:', error);
+  }
+}
+
 io.on('connection', (socket: Socket) => {
   const roomId = socket.handshake.query.roomId as string;
 
@@ -363,6 +405,7 @@ io.on('connection', (socket: Socket) => {
     io.to(roomId).emit('state_update', room);
     io.to(roomId).emit('debate-state-updated', room);
     updateLiveKitPermissions(roomId, room);
+    updateAudioTracks(roomId, room.activeSpeaker, room.phase);
   }
 
   socket.emit('state_update', room);
@@ -442,6 +485,7 @@ io.on('connection', (socket: Socket) => {
     io.to(roomId).emit('state_update', rooms[roomId]);
     io.to(roomId).emit('debate-state-updated', rooms[roomId]);
     updateLiveKitPermissions(roomId, rooms[roomId]);
+    updateAudioTracks(roomId, rooms[roomId].activeSpeaker, rooms[roomId].phase);
   });
 
   socket.on('send_message', (payload) => {
@@ -535,6 +579,7 @@ setInterval(() => {
       io.to(roomId).emit('state_update', r);
       io.to(roomId).emit('debate-state-updated', r);
       updateLiveKitPermissions(roomId, r);
+      updateAudioTracks(roomId, r.activeSpeaker, r.phase);
     }
   });
 }, 1000);
