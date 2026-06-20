@@ -13,7 +13,7 @@ docker run --rm \
   -v "$(pwd)/certbot/conf:/etc/letsencrypt" \
   -v "$(pwd)/certbot/www:/var/www/certbot" \
   certbot/certbot certonly --standalone \
-  -d shoom.fun -d livekit.shoom.fun \
+  -d shoom.fun -d www.shoom.fun -d livekit.shoom.fun \
   --email "$EMAIL" --agree-tos --no-eff-email -n
 
 echo "✅ Certificates issued. Now run: docker compose up -d --build"
