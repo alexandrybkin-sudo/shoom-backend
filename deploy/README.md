@@ -16,6 +16,12 @@ server `git pull` → `docker compose up`. Never copy files onto the server by h
 ```bash
 # 1. Install Docker (get.docker.com), open firewall:
 #    ufw allow 22,80,443/tcp; ufw allow 7881/tcp; ufw allow 50000:60000/udp; ufw allow 3478/udp
+#    # let containers reach the host-networked LiveKit signaling port:
+#    ufw allow from 172.16.0.0/12 to any port 7880 proto tcp
+#
+# 1b. (RU servers) Docker Hub rate-limits anonymous pulls — use Timeweb's mirror:
+#    echo '{ "registry-mirrors": ["https://dockerhub.timeweb.cloud"] }' > /etc/docker/daemon.json
+#    systemctl restart docker
 
 # 2. Clone both repos
 mkdir -p /opt/shoom && cd /opt/shoom
