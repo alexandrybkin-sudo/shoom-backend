@@ -198,8 +198,9 @@ app.post('/api/rooms', (req, res) => {
     counter++;
   }
 
-  // Clamp timing to safe bounds (rounds 1–12, round time 45–180s).
-  const safeRounds = Math.min(12, Math.max(1, Math.round(Number(roundsCount)) || 2));
+  // Clamp timing to safe bounds. Rounds must be EVEN (both sides speak): 2–12.
+  const evenRounds = 2 * Math.round((Number(roundsCount) || 2) / 2);
+  const safeRounds = Math.min(12, Math.max(2, evenRounds));
   const safeDuration = Math.min(180, Math.max(45, Math.round(Number(roundDuration)) || 45));
 
   getOrCreateRoom(
