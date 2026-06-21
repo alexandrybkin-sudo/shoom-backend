@@ -198,13 +198,17 @@ app.post('/api/rooms', (req, res) => {
     counter++;
   }
 
+  // Clamp timing to safe bounds (rounds 1–12, round time 45–180s).
+  const safeRounds = Math.min(12, Math.max(1, Math.round(Number(roundsCount)) || 2));
+  const safeDuration = Math.min(180, Math.max(45, Math.round(Number(roundDuration)) || 45));
+
   getOrCreateRoom(
     roomId,
     topic,
     labelA || 'Red',
     labelB || 'Blue',
-    roundsCount || 2,
-    roundDuration || 45
+    safeRounds,
+    safeDuration
   );
 
   res.json({ roomId });
