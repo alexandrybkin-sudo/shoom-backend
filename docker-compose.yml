@@ -11,6 +11,23 @@ services:
     networks:
       - shoom
 
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: shoom
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: shoom
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shoom"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - shoom
+
   backend:
     build:
       context: .
@@ -21,6 +38,9 @@ services:
       - "3001"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - shoom
 
@@ -63,3 +83,6 @@ services:
 networks:
   shoom:
     driver: bridge
+
+volumes:
+  pgdata:

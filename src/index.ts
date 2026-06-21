@@ -3,7 +3,10 @@ import { createServer } from 'http';
 import { Server, Socket } from 'socket.io';
 import cors from 'cors';
 import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
+import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
+import { initDb } from './db';
+import { authRouter } from './auth';
 
 dotenv.config();
 
@@ -140,6 +143,10 @@ app.use(cors({
 }));
 
 app.use(express.json());
+app.use(cookieParser());
+
+// --- Auth Routes ---
+app.use('/api/auth', authRouter);
 
 // --- API Routes ---
 
@@ -588,7 +595,11 @@ setInterval(() => {
   Object.keys(rooms).forEach((roomId) => cleanupRoomIfEmpty(roomId));
 }, 15000);
 
-httpServer.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`🛡️  CORS Allowed Origins: ${ALLOWED_ORIGINS.join(', ')}`);
-});
+initDb()
+  .catch((e) => console.error('⚠️ DB init failed (continuing without auth):', e))
+  .finally(() => {
+    httpServer.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`🛡️  CORS Allowed Origins: ${ALLOWED_ORIGINS.join(', ')}`);
+    });
+  });
