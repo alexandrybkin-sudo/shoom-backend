@@ -18,6 +18,14 @@ import {
   Side,
   WindowTally,
 } from './voting';
+import {
+  forumRouter,
+  seedForum,
+  setLiveBattlesProvider,
+  onTopicBattleStart,
+  onTopicBattleEnd,
+  startHeatCron,
+} from './forum';
 
 dotenv.config();
 
@@ -84,6 +92,7 @@ interface RoomState {
     swingPct: number;
     totalVoters: number;
   } | null;
+  topicId: number | null;
 }
 
 // --- Multi-Room Store ---
@@ -95,7 +104,8 @@ function getOrCreateRoom(
   labelA = 'Red',
   labelB = 'Blue',
   roundsCount = 2,
-  roundDuration = 45
+  roundDuration = 45,
+  topicId: number | null = null
 ): RoomState {
   if (!rooms[roomId]) {
     rooms[roomId] = {
@@ -127,6 +137,7 @@ function getOrCreateRoom(
       voteVoters: 0,
       matchFinalized: false,
       verdict: null,
+      topicId,
     };
     ensureVoteRuntime(roomId);
     console.log(`🏠 Created new room: ${roomId}`);
@@ -208,6 +219,7 @@ function beginMatch(roomId: string, r: RoomState) {
   vr.windowVotes = new Map();
   vr.lastWindowIdx = 0;
   vr.rateLimit = new Map();
+  if (r.topicId) onTopicBattleStart(r.topicId);
   console.log(`🗳️  Match ${r.matchId} started in room ${roomId}`);
 }
 
@@ -243,6 +255,7 @@ async function bumpTribe(key: string, wins: number, points: number) {
 async function finalizeMatch(roomId: string, r: RoomState) {
   if (!r.matchId || r.matchFinalized) return;
   r.matchFinalized = true;
+  if (r.topicId) onTopicBattleEnd(r.topicId);
 
   const vr = ensureVoteRuntime(roomId);
   const idxs = [...vr.windowVotes.keys()].sort((a, b) => a - b);
@@ -322,6 +335,20 @@ app.use(cookieParser());
 // --- Auth Routes ---
 app.use('/api/auth', authRouter);
 
+// --- Forum Routes ---
+app.use('/api/forum', forumRouter);
+
+// The forum's "live battles" rail reads from the in-memory rooms store.
+setLiveBattlesProvider(() =>
+  Object.keys(rooms)
+    .map((id) => {
+      const r = rooms[id];
+      if (!r || !r.debaterA || !r.debaterB || r.phase === 'finished') return null;
+      return { id, topic: r.topic || id.replace(/-/g, ' '), labelA: r.labelA, labelB: r.labelB, viewers: r.viewersCount, topicId: r.topicId };
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null)
+);
+
 // --- API Routes ---
 
 app.get('/api/rooms', (req, res) => {
@@ -351,7 +378,7 @@ app.get('/api/rooms', (req, res) => {
 });
 
 app.post('/api/rooms', (req, res) => {
-  const { topic, labelA, labelB, roundsCount, roundDuration } = req.body;
+  const { topic, labelA, labelB, roundsCount, roundDuration, topicId } = req.body;
   if (!topic) {
     res.status(400).json({ error: 'topic is required' });
     return;
@@ -383,7 +410,8 @@ app.post('/api/rooms', (req, res) => {
     labelA || 'Red',
     labelB || 'Blue',
     safeRounds,
-    safeDuration
+    safeDuration,
+    Number.isInteger(topicId) ? topicId : null
   );
 
   res.json({ roomId });
@@ -903,8 +931,10 @@ setInterval(() => {
 }, 15000);
 
 initDb()
-  .catch((e) => console.error('⚠️ DB init failed (continuing without auth):', e))
+  .then(() => seedForum())
+  .catch((e) => console.error('⚠️ DB init/seed failed (continuing):', e))
   .finally(() => {
+    startHeatCron();
     httpServer.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`🛡️  CORS Allowed Origins: ${ALLOWED_ORIGINS.join(', ')}`);
