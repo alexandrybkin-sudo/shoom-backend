@@ -5,8 +5,19 @@ import cors from 'cors';
 import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
-import { initDb } from './db';
-import { authRouter } from './auth';
+import { randomUUID } from 'crypto';
+import { initDb, pool } from './db';
+import { authRouter, getUserIdFromReq, getUserIdFromCookieHeader } from './auth';
+import {
+  computeVerdict,
+  tallyVotes,
+  sideKey,
+  POINTS_WIN,
+  POINTS_TIE,
+  VOTE_WINDOW_SEC,
+  Side,
+  WindowTally,
+} from './voting';
 
 dotenv.config();
 
@@ -55,6 +66,24 @@ interface RoomState {
   debaterBOnline: boolean;
   roundDuration: number;
   extraRoundsRequested: { A: boolean; B: boolean };
+
+  // --- Voting (serialized to clients) ---
+  matchId: string | null;
+  matchStartedAt: number | null;
+  voteWindowSec: number;
+  voteWindowEndsAt: number | null;
+  voteShareA: number;
+  voteShareB: number;
+  voteVoters: number;
+  matchFinalized: boolean;
+  verdict: {
+    winnerSide: 'A' | 'B' | 'tie';
+    finalShareA: number;
+    finalShareB: number;
+    swingWinner: 'A' | 'B' | 'none';
+    swingPct: number;
+    totalVoters: number;
+  } | null;
 }
 
 // --- Multi-Room Store ---
@@ -89,7 +118,17 @@ function getOrCreateRoom(
       debaterBOnline: false,
       roundDuration,
       extraRoundsRequested: { A: false, B: false },
+      matchId: null,
+      matchStartedAt: null,
+      voteWindowSec: VOTE_WINDOW_SEC,
+      voteWindowEndsAt: null,
+      voteShareA: 0.5,
+      voteShareB: 0.5,
+      voteVoters: 0,
+      matchFinalized: false,
+      verdict: null,
     };
+    ensureVoteRuntime(roomId);
     console.log(`🏠 Created new room: ${roomId}`);
 
     // Таймаут 30 секунд — удаляем комнату если никто не подключился
@@ -116,7 +155,142 @@ function cleanupRoomIfEmpty(roomId: string) {
 
   if (total === 0) {
     delete rooms[roomId];
+    delete voteRuntime[roomId];
     console.log(`🗑️ Room ${roomId} deleted (empty)`);
+  }
+}
+
+// --- Voting runtime (non-serialized, lives alongside rooms) ---
+const SEASON_ID = `season-${new Date().getUTCFullYear()}`;
+
+interface VoteRuntime {
+  windowVotes: Map<number, Map<string, Side>>; // window_idx -> (userId -> side)
+  members: Map<string, number>;                // userId -> active socket count
+  debaterUserIds: Set<string>;
+  lastWindowIdx: number;
+  rateLimit: Map<string, number>;              // userId -> last vote ts
+}
+const voteRuntime: Record<string, VoteRuntime> = {};
+
+function ensureVoteRuntime(roomId: string): VoteRuntime {
+  if (!voteRuntime[roomId]) {
+    voteRuntime[roomId] = {
+      windowVotes: new Map(),
+      members: new Map(),
+      debaterUserIds: new Set(),
+      lastWindowIdx: 0,
+      rateLimit: new Map(),
+    };
+  }
+  return voteRuntime[roomId];
+}
+
+function currentWindowIdx(r: RoomState, now: number): number {
+  if (!r.matchStartedAt) return 0;
+  return Math.floor((now - r.matchStartedAt) / (r.voteWindowSec * 1000));
+}
+
+function windowEndsAt(r: RoomState, idx: number): number {
+  return (r.matchStartedAt || Date.now()) + (idx + 1) * r.voteWindowSec * 1000;
+}
+
+function beginMatch(roomId: string, r: RoomState) {
+  const now = Date.now();
+  r.matchId = randomUUID();
+  r.matchStartedAt = now;
+  r.matchFinalized = false;
+  r.verdict = null;
+  r.voteShareA = 0.5;
+  r.voteShareB = 0.5;
+  r.voteVoters = 0;
+  r.voteWindowEndsAt = windowEndsAt(r, 0);
+  const vr = ensureVoteRuntime(roomId);
+  vr.windowVotes = new Map();
+  vr.lastWindowIdx = 0;
+  vr.rateLimit = new Map();
+  console.log(`🗳️  Match ${r.matchId} started in room ${roomId}`);
+}
+
+function emitVoteBar(roomId: string, r: RoomState) {
+  const vr = ensureVoteRuntime(roomId);
+  const w = currentWindowIdx(r, Date.now());
+  const tally = tallyVotes(vr.windowVotes.get(w) || new Map());
+  const total = tally.a + tally.b;
+  r.voteShareA = total === 0 ? 0.5 : tally.a / total;
+  r.voteShareB = total === 0 ? 0.5 : tally.b / total;
+  r.voteVoters = total;
+  r.voteWindowEndsAt = windowEndsAt(r, w);
+  io.to(roomId).emit('vote_bar_update', {
+    window_idx: w,
+    share_a: r.voteShareA,
+    share_b: r.voteShareB,
+    voters: total,
+    window_ends_at: r.voteWindowEndsAt,
+  });
+}
+
+async function bumpTribe(key: string, wins: number, points: number) {
+  await pool.query(
+    `INSERT INTO tribe_season_scores (season_id, side_key, wins, points)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (season_id, side_key)
+     DO UPDATE SET wins = tribe_season_scores.wins + $3,
+                   points = tribe_season_scores.points + $4`,
+    [SEASON_ID, key, wins, points]
+  );
+}
+
+async function finalizeMatch(roomId: string, r: RoomState) {
+  if (!r.matchId || r.matchFinalized) return;
+  r.matchFinalized = true;
+
+  const vr = ensureVoteRuntime(roomId);
+  const idxs = [...vr.windowVotes.keys()].sort((a, b) => a - b);
+  const windows: WindowTally[] = idxs.map((i) => tallyVotes(vr.windowVotes.get(i)!));
+  const voters = new Set<string>();
+  for (const m of vr.windowVotes.values()) for (const u of m.keys()) voters.add(u);
+
+  const v = computeVerdict(windows);
+  r.verdict = {
+    winnerSide: v.winnerSide,
+    finalShareA: v.finalShareA,
+    finalShareB: v.finalShareB,
+    swingWinner: v.swingWinner,
+    swingPct: v.swingPct,
+    totalVoters: voters.size,
+  };
+
+  io.to(roomId).emit('match_verdict', {
+    winner_side: v.winnerSide,
+    final_share_a: v.finalShareA,
+    final_share_b: v.finalShareB,
+    swing_winner: v.swingWinner,
+    swing_pct: v.swingPct,
+    total_voters: voters.size,
+  });
+  io.to(roomId).emit('state_update', r);
+
+  try {
+    const ins = await pool.query(
+      `INSERT INTO match_results
+         (match_id, room_id, topic, label_a, label_b, winner_side, final_share_a, final_share_b, swing_winner, swing_pct, total_voters)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       ON CONFLICT (match_id) DO NOTHING`,
+      [r.matchId, roomId, r.topic, r.labelA, r.labelB, v.winnerSide,
+        v.finalShareA, v.finalShareB, v.swingWinner, v.swingPct, voters.size]
+    );
+    // Bump tribe scores exactly once per match (only when the row was newly inserted).
+    if (ins.rowCount && ins.rowCount > 0) {
+      if (v.winnerSide === 'tie') {
+        await bumpTribe(sideKey(r.labelA), 0, POINTS_TIE);
+        await bumpTribe(sideKey(r.labelB), 0, POINTS_TIE);
+      } else {
+        const winLabel = v.winnerSide === 'A' ? r.labelA : r.labelB;
+        await bumpTribe(sideKey(winLabel), 1, POINTS_WIN);
+      }
+    }
+  } catch (e) {
+    console.error('finalizeMatch persist error:', e);
   }
 }
 
@@ -250,6 +424,94 @@ app.post('/api/rooms/:roomId/join', (req, res) => {
   }
 
   res.json({ role: 'viewer', slot: null });
+});
+
+// --- Voting: one weighted vote per user per window (last-write-wins) ---
+app.post('/api/matches/:matchId/vote', async (req: Request, res: Response): Promise<void> => {
+  const { matchId } = req.params;
+  const side = req.body?.side as Side;
+  if (side !== 'A' && side !== 'B') {
+    res.status(400).json({ error: 'side must be "A" or "B"' });
+    return;
+  }
+
+  const userId = getUserIdFromReq(req);
+  if (!userId) {
+    res.status(401).json({ error: 'sign in to vote' });
+    return;
+  }
+
+  const roomId = Object.keys(rooms).find((id) => rooms[id].matchId === matchId);
+  if (!roomId) {
+    res.status(404).json({ error: 'match not found' });
+    return;
+  }
+  const r = rooms[roomId];
+  if (r.matchFinalized || (r.phase !== 'round' && r.phase !== 'rageRound')) {
+    res.status(409).json({ error: 'voting is closed' });
+    return;
+  }
+
+  const vr = ensureVoteRuntime(roomId);
+  if (!vr.members.has(userId)) {
+    res.status(403).json({ error: 'join the room to vote' });
+    return;
+  }
+  if (vr.debaterUserIds.has(userId)) {
+    res.status(403).json({ error: 'debaters cannot vote' });
+    return;
+  }
+
+  const now = Date.now();
+  if (now - (vr.rateLimit.get(userId) || 0) < 800) {
+    res.status(429).json({ error: 'slow down' });
+    return;
+  }
+  vr.rateLimit.set(userId, now);
+
+  const w = currentWindowIdx(r, now);
+  let wm = vr.windowVotes.get(w);
+  if (!wm) {
+    wm = new Map();
+    vr.windowVotes.set(w, wm);
+  }
+  wm.set(userId, side); // last-write-wins within the window
+
+  try {
+    await pool.query(
+      `INSERT INTO vote_events (match_id, user_id, round, window_idx, side)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (match_id, user_id, window_idx)
+       DO UPDATE SET side = EXCLUDED.side, round = EXCLUDED.round, created_at = now()`,
+      [matchId, userId, r.currentRound, w, side]
+    );
+  } catch (e) {
+    console.error('vote persist error:', e);
+  }
+
+  const tally = tallyVotes(wm);
+  const total = tally.a + tally.b;
+  res.json({
+    window_idx: w,
+    share_a: total === 0 ? 0.5 : tally.a / total,
+    share_b: total === 0 ? 0.5 : tally.b / total,
+    voters: total,
+    window_ends_at: windowEndsAt(r, w),
+  });
+});
+
+app.get('/api/seasons/:id/tribes', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT side_key, wins, points FROM tribe_season_scores
+       WHERE season_id = $1 ORDER BY points DESC, wins DESC`,
+      [req.params.id]
+    );
+    res.json({ season_id: req.params.id, tribes: rows });
+  } catch (e) {
+    console.error('tribes query error:', e);
+    res.status(500).json({ error: 'failed to load tribes' });
+  }
 });
 
 app.get('/', (req, res) => {
@@ -403,6 +665,16 @@ io.on('connection', (socket: Socket) => {
     console.log(`🎤 Debater B online in room ${roomId}`);
   }
 
+  // Track room membership for voting eligibility (authenticated users only).
+  const vr = ensureVoteRuntime(roomId);
+  const userId = getUserIdFromCookieHeader(socket.handshake.headers.cookie);
+  if (userId) {
+    vr.members.set(userId, (vr.members.get(userId) || 0) + 1);
+    if (identity && (room.debaterA === identity || room.debaterB === identity)) {
+      vr.debaterUserIds.add(userId);
+    }
+  }
+
   // Автостарт если оба дебатера онлайн
   if (
     room.debaterAOnline &&
@@ -413,6 +685,7 @@ io.on('connection', (socket: Socket) => {
     room.currentRound = 1;
     room.activeSpeaker = 'A';
     room.roundEndsAt = Date.now() + room.roundDuration * 1000;
+    beginMatch(roomId, room);
     console.log(`🚀 Auto-start room ${roomId}`);
     io.to(roomId).emit('state_update', room);
     io.to(roomId).emit('debate-state-updated', room);
@@ -437,6 +710,12 @@ io.on('connection', (socket: Socket) => {
         rooms[roomId].debaterBOnline = false;
       }
 
+      if (userId && voteRuntime[roomId]) {
+        const c = (voteRuntime[roomId].members.get(userId) || 0) - 1;
+        if (c <= 0) voteRuntime[roomId].members.delete(userId);
+        else voteRuntime[roomId].members.set(userId, c);
+      }
+
       io.to(roomId).emit('state_update', rooms[roomId]);
       
       cleanupRoomIfEmpty(roomId);
@@ -454,6 +733,7 @@ io.on('connection', (socket: Socket) => {
         r.currentRound = 1;
         r.activeSpeaker = 'A';
         r.roundEndsAt = Date.now() + r.roundDuration * 1000;
+        beginMatch(roomId, r);
         break;
       case 'next_round':
         if (r.phase === 'round') {
@@ -471,11 +751,13 @@ io.on('connection', (socket: Socket) => {
         } else if (r.phase === 'rageRound') {
           r.phase = 'finished';
           r.activeSpeaker = null;
+          finalizeMatch(roomId, r);
         } else {
           r.phase = 'round';
           r.currentRound = 1;
           r.activeSpeaker = 'A';
           r.roundEndsAt = Date.now() + r.roundDuration * 1000;
+          beginMatch(roomId, r);
         }
         break;
       case 'reset':
@@ -490,8 +772,22 @@ io.on('connection', (socket: Socket) => {
           viewersCount: r.viewersCount,
           chatMessages: [],
           donations: [],
-          extraRoundsRequested: { A: false, B: false }
+          extraRoundsRequested: { A: false, B: false },
+          matchId: null,
+          matchStartedAt: null,
+          voteWindowEndsAt: null,
+          voteShareA: 0.5,
+          voteShareB: 0.5,
+          voteVoters: 0,
+          matchFinalized: false,
+          verdict: null,
         };
+        {
+          const vrr = ensureVoteRuntime(roomId);
+          vrr.windowVotes = new Map();
+          vrr.lastWindowIdx = 0;
+          vrr.rateLimit = new Map();
+        }
         break;
     }
     io.to(roomId).emit('state_update', rooms[roomId]);
@@ -569,7 +865,13 @@ setInterval(() => {
     } else if (r.phase === 'rageRound' && r.rageRoundEndsAt && now >= r.rageRoundEndsAt) {
       r.phase = 'finished';
       r.activeSpeaker = null;
+      finalizeMatch(roomId, r);
       changed = true;
+    }
+
+    // Live persuasion bar: push the current window's tally once per tick (<=1/sec).
+    if (r.matchId && (r.phase === 'round' || r.phase === 'rageRound')) {
+      emitVoteBar(roomId, r);
     }
 
     // Update timeLeft for UI backward compatibility

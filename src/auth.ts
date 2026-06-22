@@ -39,6 +39,19 @@ export function getUserIdFromReq(req: Request): string | null {
   }
 }
 
+// Reads the current user id from a raw Cookie header (used for socket.io handshakes).
+export function getUserIdFromCookieHeader(cookieHeader?: string): string | null {
+  if (!cookieHeader) return null;
+  const m = cookieHeader.match(/(?:^|;\s*)shoom_token=([^;]+)/);
+  if (!m) return null;
+  try {
+    const payload = jwt.verify(decodeURIComponent(m[1]), JWT_SECRET) as { sub: string };
+    return payload.sub;
+  } catch {
+    return null;
+  }
+}
+
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const userId = getUserIdFromReq(req);
   if (!userId) {

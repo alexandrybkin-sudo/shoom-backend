@@ -38,5 +38,45 @@ export async function initDb(): Promise<void> {
       created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
-  console.log('🗄️  Postgres ready (users table ensured)');
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS vote_events (
+      id          BIGSERIAL PRIMARY KEY,
+      match_id    TEXT NOT NULL,
+      user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      round       INT NOT NULL,
+      window_idx  INT NOT NULL,
+      side        TEXT NOT NULL CHECK (side IN ('A','B')),
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (match_id, user_id, window_idx)
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS match_results (
+      match_id      TEXT PRIMARY KEY,
+      room_id       TEXT,
+      topic         TEXT,
+      label_a       TEXT,
+      label_b       TEXT,
+      winner_side   TEXT NOT NULL CHECK (winner_side IN ('A','B','tie')),
+      final_share_a NUMERIC NOT NULL,
+      final_share_b NUMERIC NOT NULL,
+      swing_winner  TEXT NOT NULL CHECK (swing_winner IN ('A','B','none')),
+      swing_pct     NUMERIC NOT NULL,
+      total_voters  INT NOT NULL,
+      ended_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tribe_season_scores (
+      season_id TEXT NOT NULL,
+      side_key  TEXT NOT NULL,
+      wins      INT NOT NULL DEFAULT 0,
+      points    INT NOT NULL DEFAULT 0,
+      PRIMARY KEY (season_id, side_key)
+    );
+  `);
+
+  console.log('🗄️  Postgres ready (users, vote_events, match_results, tribe_season_scores)');
 }
