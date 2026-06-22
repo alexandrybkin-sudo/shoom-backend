@@ -4,6 +4,9 @@ import jwt from 'jsonwebtoken';
 import { pool, publicUser, User } from './db';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-insecure-secret-change-me';
+const SUPPORTED_LOCALES = ['en', 'ru', 'es'];
+const normalizeLocale = (l: unknown): string =>
+  SUPPORTED_LOCALES.includes(String(l)) ? String(l) : 'en';
 const COOKIE_NAME = 'shoom_token';
 const IS_PROD = process.env.NODE_ENV === 'production';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
@@ -105,7 +108,7 @@ export const authRouter = Router();
 
 authRouter.post('/register', async (req: Request, res: Response) => {
   try {
-    const { email, password, displayName } = req.body || {};
+    const { email, password, displayName, locale } = req.body || {};
     if (!email || !password) {
       res.status(400).json({ error: 'email and password are required' });
       return;
@@ -124,8 +127,8 @@ authRouter.post('/register', async (req: Request, res: Response) => {
     const hash = await bcrypt.hash(password, 10);
     const name = (displayName && String(displayName).trim()) || String(email).split('@')[0];
     const { rows } = await pool.query(
-      `INSERT INTO users (email, password_hash, display_name) VALUES ($1, $2, $3) RETURNING *`,
-      [email, hash, name]
+      `INSERT INTO users (email, password_hash, display_name, locale) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [email, hash, name, normalizeLocale(locale)]
     );
 
     const user = rows[0];
@@ -169,6 +172,23 @@ authRouter.post('/login', async (req: Request, res: Response) => {
 authRouter.post('/logout', (_req: Request, res: Response) => {
   res.clearCookie(COOKIE_NAME, { path: '/' });
   res.json({ ok: true });
+});
+
+// Update the signed-in user's preferred language.
+authRouter.post('/locale', async (req: Request, res: Response) => {
+  const userId = getUserIdFromReq(req);
+  if (!userId) {
+    res.status(401).json({ error: 'not authenticated' });
+    return;
+  }
+  const locale = normalizeLocale(req.body?.locale);
+  try {
+    await pool.query('UPDATE users SET locale = $1 WHERE id = $2', [locale, userId]);
+    res.json({ locale });
+  } catch (e) {
+    console.error('locale update error:', e);
+    res.status(500).json({ error: 'failed to update locale' });
+  }
 });
 
 authRouter.get('/me', async (req: Request, res: Response) => {
