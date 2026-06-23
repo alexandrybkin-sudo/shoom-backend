@@ -353,15 +353,17 @@ forumRouter.post('/topics/:id/posts', async (req: Request, res: Response): Promi
       'INSERT INTO topic_posts (topic_id, user_id, side, body) VALUES ($1,$2,$3,$4)',
       [topicId, userId, side, String(body).trim().slice(0, 2000)]
     );
-    // Refresh denormalized counters.
+    // Bump denormalized counters (seed values are a base, so increment rather than recompute).
+    // participants only grows when this is the author's first post in the topic.
     await pool.query(
       `UPDATE topic_stats s SET
-         posts_count = (SELECT COUNT(*) FROM topic_posts WHERE topic_id = $1),
-         participants_count = (SELECT COUNT(DISTINCT user_id) FROM topic_posts WHERE topic_id = $1),
+         posts_count = s.posts_count + 1,
+         participants_count = s.participants_count +
+           CASE WHEN (SELECT COUNT(*) FROM topic_posts WHERE topic_id = $1 AND user_id = $3) = 1 THEN 1 ELSE 0 END,
          last_activity_at = now(),
          heat_score = s.heat_score + $2
        WHERE s.topic_id = $1`,
-      [topicId, HEAT_POST]
+      [topicId, HEAT_POST, userId]
     );
     res.json({ ok: true });
   } catch (e) {
