@@ -10,7 +10,7 @@ const HEAT_BATTLE_END = 3;
 const HEAT_DECAY = 0.985; // per cron tick (~90s)
 
 // --- Live battles bridge (rooms live in index.ts, in-memory) ---
-type LiveBattle = { id: string; topic: string; labelA: string; labelB: string; viewers: number; topicId: number | null };
+type LiveBattle = { id: string; topic: string; labelA: string; labelB: string; viewers: number; topicId: number | null; isOpen: boolean; isLive: boolean; phase: string };
 let liveBattlesProvider: () => LiveBattle[] = () => [];
 export function setLiveBattlesProvider(fn: () => LiveBattle[]) {
   liveBattlesProvider = fn;

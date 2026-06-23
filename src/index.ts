@@ -338,13 +338,26 @@ app.use('/api/auth', authRouter);
 // --- Forum Routes ---
 app.use('/api/forum', forumRouter);
 
-// The forum's "live battles" rail reads from the in-memory rooms store.
+// The forum's debates rail reads from the in-memory rooms store (open + live).
 setLiveBattlesProvider(() =>
   Object.keys(rooms)
     .map((id) => {
       const r = rooms[id];
-      if (!r || !r.debaterA || !r.debaterB || r.phase === 'finished') return null;
-      return { id, topic: r.topic || id.replace(/-/g, ' '), labelA: r.labelA, labelB: r.labelB, viewers: r.viewersCount, topicId: r.topicId };
+      if (!r || !r.debaterA || r.phase === 'finished') return null;
+      const isOpen = !!r.debaterA && !r.debaterB;
+      const isLive = !!r.debaterA && !!r.debaterB;
+      if (!isOpen && !isLive) return null;
+      return {
+        id,
+        topic: r.topic || id.replace(/-/g, ' '),
+        labelA: r.labelA,
+        labelB: r.labelB,
+        viewers: r.viewersCount,
+        topicId: r.topicId,
+        isOpen,
+        isLive,
+        phase: r.phase,
+      };
     })
     .filter((x): x is NonNullable<typeof x> => x !== null)
 );
