@@ -157,15 +157,16 @@ forumRouter.get('/home', async (req: Request, res: Response) => {
   try {
     const categories = await pool.query(
       `SELECT c.id, c.slug, c.emoji,
-              COUNT(t.id) FILTER (WHERE t.status = 'active')::int AS "topicsCount",
-              COALESCE(SUM(s.live_battles), 0)::int AS "liveBattles",
-              COUNT(t.id) FILTER (WHERE t.created_at > now() - interval '24 hours')::int AS "new24h"
+              COUNT(t.id) FILTER (WHERE t.status = 'active' AND t.lang = $1)::int AS "topicsCount",
+              COALESCE(SUM(s.live_battles) FILTER (WHERE t.lang = $1), 0)::int AS "liveBattles",
+              COUNT(t.id) FILTER (WHERE t.lang = $1 AND t.created_at > now() - interval '24 hours')::int AS "new24h"
        FROM categories c
        LEFT JOIN topics t ON t.category_id = c.id
        LEFT JOIN topic_stats s ON s.topic_id = t.id
        WHERE c.is_active
        GROUP BY c.id
-       ORDER BY c.sort_order`
+       ORDER BY c.sort_order`,
+      [lang]
     );
 
     const hot = await pool.query(
