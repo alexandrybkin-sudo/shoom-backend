@@ -616,8 +616,11 @@ async function updateLiveKitPermissions(roomId: string, r: RoomState) {
   try {
     const roomService = new RoomServiceClient(livekitUrl, apiKey, apiSecret);
     
-    const canPublishA = r.phase === 'rageRound' || (r.phase === 'round' && r.activeSpeaker === 'A');
-    const canPublishB = r.phase === 'rageRound' || (r.phase === 'round' && r.activeSpeaker === 'B');
+    // Both debaters keep publishing video for the whole debate so neither tile vanishes.
+    // Turn-taking is enforced on AUDIO only (see updateAudioTracks), not by revoking canPublish.
+    const debateActive = r.phase === 'round' || r.phase === 'rageRound';
+    const canPublishA = debateActive;
+    const canPublishB = debateActive;
 
     if (r.debaterA) {
       await roomService.updateParticipant(roomId, r.debaterA, undefined, {
