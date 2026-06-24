@@ -42,7 +42,7 @@ const ALLOWED_ORIGINS = [
 ].filter((url): url is string => !!url); // Убираем пустые значения
 
 // --- Types ---
-type Phase = 'waiting' | 'round' | 'rageRound' | 'finished';
+type Phase = 'waiting' | 'coinflip' | 'round' | 'rageRound' | 'finished';
 type Player = 'A' | 'B';
 
 interface ChatMessage {
@@ -84,6 +84,8 @@ interface RoomState {
   voteShareB: number;
   voteVoters: number;
   matchFinalized: boolean;
+  coinFlipResult: Player | null;
+  coinFlipEndsAt: number | null;
   verdict: {
     winnerSide: 'A' | 'B' | 'tie';
     finalShareA: number;
@@ -136,6 +138,8 @@ function getOrCreateRoom(
       voteShareB: 0.5,
       voteVoters: 0,
       matchFinalized: false,
+      coinFlipResult: null,
+      coinFlipEndsAt: null,
       verdict: null,
       topicId,
     };
@@ -203,6 +207,19 @@ function currentWindowIdx(r: RoomState, now: number): number {
 
 function windowEndsAt(r: RoomState, idx: number): number {
   return (r.matchStartedAt || Date.now()) + (idx + 1) * r.voteWindowSec * 1000;
+}
+
+const COIN_FLIP_MS = 4000;
+
+// Server-driven coin toss: pick the first side once, broadcast it, both clients animate to it.
+function startCoinFlip(r: RoomState) {
+  r.phase = 'coinflip';
+  r.currentRound = 0;
+  r.activeSpeaker = null;
+  r.roundEndsAt = null;
+  r.rageRoundEndsAt = null;
+  r.coinFlipResult = Math.random() < 0.5 ? 'A' : 'B';
+  r.coinFlipEndsAt = Date.now() + COIN_FLIP_MS;
 }
 
 function beginMatch(roomId: string, r: RoomState) {
@@ -618,7 +635,7 @@ async function updateLiveKitPermissions(roomId: string, r: RoomState) {
     
     // Both debaters keep publishing video for the whole debate so neither tile vanishes.
     // Turn-taking is enforced on AUDIO only (see updateAudioTracks), not by revoking canPublish.
-    const debateActive = r.phase === 'round' || r.phase === 'rageRound';
+    const debateActive = r.phase === 'coinflip' || r.phase === 'round' || r.phase === 'rageRound';
     const canPublishA = debateActive;
     const canPublishB = debateActive;
 
@@ -719,22 +736,16 @@ io.on('connection', (socket: Socket) => {
     }
   }
 
-  // Автостарт если оба дебатера онлайн
+  // Автостарт если оба дебатера онлайн — сначала розыгрыш монетки
   if (
     room.debaterAOnline &&
     room.debaterBOnline &&
     room.phase === 'waiting'
   ) {
-    room.phase = 'round';
-    room.currentRound = 1;
-    room.activeSpeaker = 'A';
-    room.roundEndsAt = Date.now() + room.roundDuration * 1000;
-    beginMatch(roomId, room);
-    console.log(`🚀 Auto-start room ${roomId}`);
+    startCoinFlip(room);
+    console.log(`🪙 Coin flip in room ${roomId} → first: ${room.coinFlipResult}`);
     io.to(roomId).emit('state_update', room);
     io.to(roomId).emit('debate-state-updated', room);
-    updateLiveKitPermissions(roomId, room);
-    updateAudioTracks(roomId, room.activeSpeaker, room.phase);
   }
 
   socket.emit('state_update', room);
@@ -773,11 +784,7 @@ io.on('connection', (socket: Socket) => {
 
     switch (payload.action) {
       case 'start':
-        r.phase = 'round';
-        r.currentRound = 1;
-        r.activeSpeaker = 'A';
-        r.roundEndsAt = Date.now() + r.roundDuration * 1000;
-        beginMatch(roomId, r);
+        startCoinFlip(r);
         break;
       case 'next_round':
         if (r.phase === 'round') {
@@ -797,11 +804,7 @@ io.on('connection', (socket: Socket) => {
           r.activeSpeaker = null;
           finalizeMatch(roomId, r);
         } else {
-          r.phase = 'round';
-          r.currentRound = 1;
-          r.activeSpeaker = 'A';
-          r.roundEndsAt = Date.now() + r.roundDuration * 1000;
-          beginMatch(roomId, r);
+          startCoinFlip(r);
         }
         break;
       case 'reset':
@@ -824,6 +827,8 @@ io.on('connection', (socket: Socket) => {
           voteShareB: 0.5,
           voteVoters: 0,
           matchFinalized: false,
+          coinFlipResult: null,
+          coinFlipEndsAt: null,
           verdict: null,
         };
         {
@@ -893,7 +898,16 @@ setInterval(() => {
     if (!r) return;
     let changed = false;
 
-    if (r.phase === 'round' && r.roundEndsAt && now >= r.roundEndsAt) {
+    if (r.phase === 'coinflip' && r.coinFlipEndsAt && now >= r.coinFlipEndsAt) {
+      // Coin landed → start round 1 with the chosen first speaker.
+      r.phase = 'round';
+      r.currentRound = 1;
+      r.activeSpeaker = r.coinFlipResult || 'A';
+      r.roundEndsAt = now + r.roundDuration * 1000;
+      r.coinFlipEndsAt = null;
+      beginMatch(roomId, r);
+      changed = true;
+    } else if (r.phase === 'round' && r.roundEndsAt && now >= r.roundEndsAt) {
       if (r.currentRound >= r.roundsTotal && r.activeSpeaker === 'B') {
         r.phase = 'rageRound';
         r.rageRoundEndsAt = now + 120000;
