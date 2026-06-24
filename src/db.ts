@@ -141,5 +141,15 @@ export async function initDb(): Promise<void> {
     );
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS follows (
+      user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      target_type TEXT NOT NULL CHECK (target_type IN ('category','topic')),
+      target_id   BIGINT NOT NULL,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (user_id, target_type, target_id)
+    );
+  `);
+
   console.log('🗄️  Postgres ready (users, votes, matches, tribes, forum)');
 }

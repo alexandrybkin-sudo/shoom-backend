@@ -103,13 +103,10 @@ export async function seedForum(): Promise<void> {
            VALUES ($1,$2,$3,$4,$5,$6,true) RETURNING id`,
           [categoryId, slug, title, lang, labels.a, labels.b]
         );
-        // Seed some plausible activity so the "hot" rail is populated.
-        const posts = 5 + Math.floor(Math.random() * 60);
-        const heat = 15 + Math.floor(Math.random() * 110);
+        // Real counters from zero — no fabricated activity.
         await pool.query(
-          `INSERT INTO topic_stats (topic_id, posts_count, participants_count, battles_count, heat_score, last_activity_at)
-           VALUES ($1,$2,$3,$4,$5, now())`,
-          [t.rows[0].id, posts, Math.ceil(posts / 3), Math.floor(Math.random() * 6), heat]
+          `INSERT INTO topic_stats (topic_id, last_activity_at) VALUES ($1, now())`,
+          [t.rows[0].id]
         );
       }
     }
@@ -328,6 +325,57 @@ forumRouter.post('/interests', async (req: Request, res: Response): Promise<void
   } catch (e) {
     console.error('save interests error:', e);
     res.status(500).json({ error: 'failed to save interests' });
+  }
+});
+
+// --- Follow / subscribe (a category or a topic) ---
+forumRouter.post('/follow', async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserIdFromReq(req);
+  if (!userId) {
+    res.status(401).json({ error: 'sign in to subscribe' });
+    return;
+  }
+  const { targetType, targetId } = req.body || {};
+  if (!['category', 'topic'].includes(targetType) || !Number.isInteger(targetId)) {
+    res.status(400).json({ error: 'bad target' });
+    return;
+  }
+  try {
+    const del = await pool.query(
+      'DELETE FROM follows WHERE user_id=$1 AND target_type=$2 AND target_id=$3',
+      [userId, targetType, targetId]
+    );
+    if (del.rowCount && del.rowCount > 0) {
+      res.json({ following: false });
+      return;
+    }
+    await pool.query(
+      'INSERT INTO follows (user_id, target_type, target_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING',
+      [userId, targetType, targetId]
+    );
+    res.json({ following: true });
+  } catch (e) {
+    console.error('follow error:', e);
+    res.status(500).json({ error: 'failed to subscribe' });
+  }
+});
+
+forumRouter.get('/follow', async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserIdFromReq(req);
+  const targetType = String(req.query.targetType || '');
+  const targetId = parseInt(String(req.query.targetId || ''), 10);
+  if (!userId || !targetId) {
+    res.json({ following: false });
+    return;
+  }
+  try {
+    const { rows } = await pool.query(
+      'SELECT 1 FROM follows WHERE user_id=$1 AND target_type=$2 AND target_id=$3',
+      [userId, targetType, targetId]
+    );
+    res.json({ following: rows.length > 0 });
+  } catch {
+    res.json({ following: false });
   }
 });
 
