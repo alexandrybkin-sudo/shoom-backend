@@ -7,6 +7,31 @@ const JWT_SECRET = process.env.JWT_SECRET || 'dev-insecure-secret-change-me';
 const SUPPORTED_LOCALES = ['en', 'ru', 'es'];
 const normalizeLocale = (l: unknown): string =>
   SUPPORTED_LOCALES.includes(String(l)) ? String(l) : 'en';
+
+// Usernames: 3–20 chars, lowercase a-z 0-9 and underscore.
+const USERNAME_RE = /^[a-z0-9_]{3,20}$/;
+function normalizeUsername(u: unknown): string | null {
+  const s = String(u ?? '').trim().toLowerCase();
+  return USERNAME_RE.test(s) ? s : null;
+}
+async function usernameTaken(username: string, exceptUserId?: string): Promise<boolean> {
+  const { rows } = await pool.query(
+    `SELECT 1 FROM users WHERE username = $1 ${exceptUserId ? 'AND id <> $2' : ''}`,
+    exceptUserId ? [username, exceptUserId] : [username]
+  );
+  return rows.length > 0;
+}
+// Derive a free, valid username from a name/email seed.
+async function generateUsername(seed: string): Promise<string> {
+  let base = String(seed || 'user').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 16);
+  if (base.length < 3) base = `user${base}`;
+  let candidate = base;
+  for (let i = 0; i < 30; i++) {
+    if (!(await usernameTaken(candidate))) return candidate;
+    candidate = `${base.slice(0, 14)}${Math.floor(Math.random() * 9000 + 1000)}`;
+  }
+  return `${base.slice(0, 12)}${Date.now().toString().slice(-6)}`;
+}
 const COOKIE_NAME = 'shoom_token';
 const IS_PROD = process.env.NODE_ENV === 'production';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
@@ -94,10 +119,11 @@ async function upsertSocialUser(opts: {
     }
   }
 
+  const uname = await generateUsername(opts.displayName || opts.email || 'user');
   const inserted = await pool.query(
-    `INSERT INTO users (email, display_name, avatar_url, ${col})
-     VALUES ($1, $2, $3, $4) RETURNING *`,
-    [opts.email, opts.displayName, opts.avatarUrl, opts.providerId]
+    `INSERT INTO users (email, display_name, avatar_url, ${col}, username)
+     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    [opts.email, opts.displayName, opts.avatarUrl, opts.providerId, uname]
   );
   return inserted.rows[0];
 }
@@ -108,7 +134,7 @@ export const authRouter = Router();
 
 authRouter.post('/register', async (req: Request, res: Response) => {
   try {
-    const { email, password, displayName, locale } = req.body || {};
+    const { email, password, displayName, locale, username } = req.body || {};
     if (!email || !password) {
       res.status(400).json({ error: 'email and password are required' });
       return;
@@ -124,11 +150,28 @@ authRouter.post('/register', async (req: Request, res: Response) => {
       return;
     }
 
+    // Resolve username: validate if given (else auto-generate from email/name).
+    let uname: string;
+    if (username !== undefined && username !== null && String(username).trim() !== '') {
+      const norm = normalizeUsername(username);
+      if (!norm) {
+        res.status(400).json({ error: 'username must be 3–20 chars: a–z, 0–9, _' });
+        return;
+      }
+      if (await usernameTaken(norm)) {
+        res.status(409).json({ error: 'username already taken' });
+        return;
+      }
+      uname = norm;
+    } else {
+      uname = await generateUsername(String(email).split('@')[0]);
+    }
+
     const hash = await bcrypt.hash(password, 10);
     const name = (displayName && String(displayName).trim()) || String(email).split('@')[0];
     const { rows } = await pool.query(
-      `INSERT INTO users (email, password_hash, display_name, locale) VALUES ($1, $2, $3, $4) RETURNING *`,
-      [email, hash, name, normalizeLocale(locale)]
+      `INSERT INTO users (email, password_hash, display_name, locale, username) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [email, hash, name, normalizeLocale(locale), uname]
     );
 
     const user = rows[0];
@@ -203,6 +246,41 @@ authRouter.get('/me', async (req: Request, res: Response) => {
     return;
   }
   res.json({ user: publicUser(user) });
+});
+
+// Check whether a username is valid and free.
+authRouter.get('/username-available', async (req: Request, res: Response): Promise<void> => {
+  const norm = normalizeUsername(req.query.u);
+  if (!norm) {
+    res.json({ valid: false, available: false });
+    return;
+  }
+  res.json({ valid: true, available: !(await usernameTaken(norm)) });
+});
+
+// Change the signed-in user's username.
+authRouter.post('/username', async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserIdFromReq(req);
+  if (!userId) {
+    res.status(401).json({ error: 'not authenticated' });
+    return;
+  }
+  const norm = normalizeUsername(req.body?.username);
+  if (!norm) {
+    res.status(400).json({ error: 'username must be 3–20 chars: a–z, 0–9, _' });
+    return;
+  }
+  if (await usernameTaken(norm, userId)) {
+    res.status(409).json({ error: 'username already taken' });
+    return;
+  }
+  try {
+    const { rows } = await pool.query('UPDATE users SET username = $1 WHERE id = $2 RETURNING *', [norm, userId]);
+    res.json({ user: publicUser(rows[0]) });
+  } catch (e) {
+    console.error('username update error:', e);
+    res.status(500).json({ error: 'failed to update username' });
+  }
 });
 
 // --- Google OAuth ---

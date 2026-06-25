@@ -12,6 +12,7 @@ export interface User {
   google_id: string | null;
   vk_id: string | null;
   locale: string;
+  username: string | null;
 }
 
 // Public shape returned to clients (never includes password_hash).
@@ -24,6 +25,7 @@ export function publicUser(u: any): User {
     google_id: u.google_id ?? null,
     vk_id: u.vk_id ?? null,
     locale: u.locale ?? 'en',
+    username: u.username ?? null,
   };
 }
 
@@ -43,6 +45,9 @@ export async function initDb(): Promise<void> {
   `);
   // For tables that pre-date the locale column.
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS locale TEXT NOT NULL DEFAULT 'en';`);
+  // Unique @username handle.
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT;`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS users_username_uniq ON users (username);`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS vote_events (
       id          BIGSERIAL PRIMARY KEY,
