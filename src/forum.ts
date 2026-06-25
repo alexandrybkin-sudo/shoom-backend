@@ -336,7 +336,8 @@ forumRouter.post('/follow', async (req: Request, res: Response): Promise<void> =
     res.status(401).json({ error: 'sign in to subscribe' });
     return;
   }
-  const { targetType, targetId } = req.body || {};
+  const targetType = req.body?.targetType;
+  const targetId = Number(req.body?.targetId);
   if (!['category', 'topic'].includes(targetType) || !Number.isInteger(targetId)) {
     res.status(400).json({ error: 'bad target' });
     return;
