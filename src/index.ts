@@ -632,23 +632,34 @@ async function updateLiveKitPermissions(roomId: string, r: RoomState) {
 
   try {
     const roomService = new RoomServiceClient(livekitUrl, apiKey, apiSecret);
-    
-    // Both debaters keep publishing video for the whole debate so neither tile vanishes.
-    // Turn-taking is enforced on AUDIO only (see updateAudioTracks), not by revoking canPublish.
-    const debateActive = r.phase === 'coinflip' || r.phase === 'round' || r.phase === 'rageRound';
-    const canPublishA = debateActive;
-    const canPublishB = debateActive;
+
+    // Camera is allowed for both the whole debate (neither tile vanishes); the MICROPHONE
+    // source is granted only to the active speaker (both during the rage round). This is the
+    // authoritative turn-taking gate — a non-active debater simply cannot publish audio.
+    const TS_CAMERA = 1; // TrackSource.CAMERA
+    const TS_MIC = 2;    // TrackSource.MICROPHONE
+    const videoActive = r.phase === 'coinflip' || r.phase === 'round' || r.phase === 'rageRound';
+    const micA = r.phase === 'rageRound' || (r.phase === 'round' && r.activeSpeaker === 'A');
+    const micB = r.phase === 'rageRound' || (r.phase === 'round' && r.activeSpeaker === 'B');
+    const sources = (mic: boolean): number[] => {
+      const s: number[] = [];
+      if (videoActive) s.push(TS_CAMERA);
+      if (mic) s.push(TS_MIC);
+      return s;
+    };
 
     if (r.debaterA) {
       await roomService.updateParticipant(roomId, r.debaterA, undefined, {
-        canPublish: canPublishA,
+        canPublish: videoActive,
+        canPublishSources: sources(micA) as any,
         canSubscribe: true,
         canPublishData: true,
       });
     }
     if (r.debaterB) {
       await roomService.updateParticipant(roomId, r.debaterB, undefined, {
-        canPublish: canPublishB,
+        canPublish: videoActive,
+        canPublishSources: sources(micB) as any,
         canSubscribe: true,
         canPublishData: true,
       });
@@ -746,6 +757,7 @@ io.on('connection', (socket: Socket) => {
     console.log(`🪙 Coin flip in room ${roomId} → first: ${room.coinFlipResult}`);
     io.to(roomId).emit('state_update', room);
     io.to(roomId).emit('debate-state-updated', room);
+    updateLiveKitPermissions(roomId, room);
   }
 
   socket.emit('state_update', room);
@@ -842,7 +854,6 @@ io.on('connection', (socket: Socket) => {
     io.to(roomId).emit('state_update', rooms[roomId]);
     io.to(roomId).emit('debate-state-updated', rooms[roomId]);
     updateLiveKitPermissions(roomId, rooms[roomId]);
-    updateAudioTracks(roomId, rooms[roomId].activeSpeaker, rooms[roomId].phase);
   });
 
   socket.on('send_message', (payload) => {
@@ -951,7 +962,6 @@ setInterval(() => {
       io.to(roomId).emit('state_update', r);
       io.to(roomId).emit('debate-state-updated', r);
       updateLiveKitPermissions(roomId, r);
-      updateAudioTracks(roomId, r.activeSpeaker, r.phase);
     }
   });
 }, 1000);
