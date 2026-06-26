@@ -7,8 +7,10 @@ WORKDIR /app
 # Копируем файлы зависимостей
 COPY package*.json ./
 
-# Устанавливаем зависимости (включая devDependencies для сборки TS)
-RUN npm ci
+# Устанавливаем зависимости (включая devDependencies для сборки TS).
+# --include=dev форсирует dev-зависимости (typescript) даже если в окружении
+# сборки выставлен NODE_ENV=production — иначе `tsc` не находится на этапе build.
+RUN npm ci --include=dev
 
 # Копируем исходный код
 COPY . .
