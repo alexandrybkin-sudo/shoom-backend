@@ -8,9 +8,11 @@ WORKDIR /app
 COPY package*.json ./
 
 # Устанавливаем зависимости (включая devDependencies для сборки TS).
-# --include=dev форсирует dev-зависимости (typescript) даже если в окружении
-# сборки выставлен NODE_ENV=production — иначе `tsc` не находится на этапе build.
-RUN npm ci --include=dev
+# Реестр npmjs.org с RU-сервера нестабилен (ETIMEDOUT на части тарболлов, в т.ч.
+# typescript → падал `npm ci` с "Exit handler never called"). Тянем через зеркало
+# registry.npmmirror.com (как docker-hub зеркало в daemon.json). --include=dev на
+# случай NODE_ENV=production в окружении сборки.
+RUN npm ci --include=dev --no-audit --no-fund --registry=https://registry.npmmirror.com
 
 # Копируем исходный код
 COPY . .
@@ -28,8 +30,8 @@ ENV NODE_ENV production
 # Копируем package.json для запуска
 COPY package*.json ./
 
-# Устанавливаем только production зависимости (меньше вес образа)
-RUN npm ci --only=production
+# Устанавливаем только production зависимости (меньше вес образа). Тоже через зеркало.
+RUN npm ci --omit=dev --no-audit --no-fund --registry=https://registry.npmmirror.com
 
 # Копируем собранный код из builder
 COPY --from=builder /app/dist ./dist
