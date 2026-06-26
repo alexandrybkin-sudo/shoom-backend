@@ -251,7 +251,7 @@ forumRouter.get('/topics/:slug', async (req: Request, res: Response): Promise<vo
     }
     const topic = t.rows[0];
     const posts = await pool.query(
-      `SELECT p.side, p.body, p.created_at AS "createdAt", u.display_name AS "author", u.avatar_url AS "avatar"
+      `SELECT p.side, p.body, p.created_at AS "createdAt", u.display_name AS "author", u.username AS "authorHandle", u.avatar_url AS "avatar"
        FROM topic_posts p JOIN users u ON u.id = p.user_id
        WHERE p.topic_id = $1
        ORDER BY p.created_at ASC

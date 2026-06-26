@@ -8,6 +8,7 @@ import dotenv from 'dotenv';
 import { randomUUID } from 'crypto';
 import { initDb, pool } from './db';
 import { authRouter, getUserIdFromReq, getUserIdFromCookieHeader } from './auth';
+import { profileRouter, UPLOADS_DIR } from './profile';
 import {
   computeVerdict,
   tallyVotes,
@@ -371,6 +372,11 @@ app.use('/api/auth', authRouter);
 
 // --- Forum Routes ---
 app.use('/api/forum', forumRouter);
+
+// --- Profile + account settings ---
+app.use('/api', profileRouter);
+// Serve uploaded avatars (local volume); nginx routes /api/* to the backend.
+app.use('/api/uploads', express.static(UPLOADS_DIR, { maxAge: '7d', immutable: false }));
 
 // The forum's debates rail reads from the in-memory rooms store (open + live).
 setLiveBattlesProvider(() =>

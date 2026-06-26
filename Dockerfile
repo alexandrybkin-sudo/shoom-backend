@@ -35,6 +35,11 @@ COPY --from=builder /app/dist ./dist
 # Создаем пользователя (безопасность)
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
+
+# Каталог для загруженных аватаров (монтируется как docker volume).
+# Создаём с нужным владельцем — named volume унаследует права при первом монтировании.
+RUN mkdir -p /app/uploads/avatars && chown -R nextjs:nodejs /app/uploads
+
 USER nextjs
 
 EXPOSE 3001
