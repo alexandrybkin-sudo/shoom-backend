@@ -970,6 +970,30 @@ setInterval(() => {
   Object.keys(rooms).forEach((roomId) => cleanupRoomIfEmpty(roomId));
 }, 15000);
 
+// Scheduled battles: at T-0, materialize an in-memory (open) room from the row.
+setInterval(async () => {
+  try {
+    const due = await pool.query(
+      `SELECT * FROM scheduled_battles WHERE status = 'scheduled' AND scheduled_at <= now() ORDER BY scheduled_at ASC LIMIT 10`
+    );
+    for (const s of due.rows) {
+      const baseId =
+        String(s.topic).toLowerCase().replace(/[^a-z0-9\s]/g, '').trim().replace(/\s+/g, '-').substring(0, 50) || 'battle';
+      let roomId = baseId;
+      let counter = 2;
+      while (rooms[roomId]) {
+        roomId = `${baseId}-${counter}`;
+        counter++;
+      }
+      getOrCreateRoom(roomId, s.topic, s.label_a, s.label_b, s.rounds, s.round_duration, s.topic_id ? Number(s.topic_id) : null);
+      await pool.query(`UPDATE scheduled_battles SET status = 'live', match_id = $1 WHERE id = $2`, [roomId, s.id]);
+      console.log(`📅 Scheduled battle ${s.id} → live room ${roomId}`);
+    }
+  } catch (e) {
+    console.error('scheduler error:', e);
+  }
+}, 10000);
+
 initDb()
   .then(() => seedForum())
   .catch((e) => console.error('⚠️ DB init/seed failed (continuing):', e))

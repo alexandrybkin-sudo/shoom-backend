@@ -180,10 +180,19 @@ forumRouter.get('/home', async (req: Request, res: Response) => {
       [lang]
     );
 
+    const scheduled = await pool.query(
+      `SELECT id, topic, label_a AS "labelA", label_b AS "labelB", scheduled_at AS "scheduledAt"
+       FROM scheduled_battles
+       WHERE status = 'scheduled' AND scheduled_at > now()
+       ORDER BY scheduled_at ASC
+       LIMIT 6`
+    );
+
     res.json({
       categories: categories.rows,
       hotTopics: hot.rows,
       liveBattles: liveBattlesProvider(),
+      scheduledBattles: scheduled.rows,
     });
   } catch (e) {
     console.error('forum home error:', e);
@@ -326,6 +335,41 @@ forumRouter.post('/interests', async (req: Request, res: Response): Promise<void
   } catch (e) {
     console.error('save interests error:', e);
     res.status(500).json({ error: 'failed to save interests' });
+  }
+});
+
+// --- Scheduled battles (MVP: open slot, auto-starts at T-0) ---
+forumRouter.post('/schedules', async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserIdFromReq(req);
+  if (!userId) {
+    res.status(401).json({ error: 'sign in to schedule a battle' });
+    return;
+  }
+  const { topic, labelA, labelB, rounds, roundDuration, scheduledAt, topicId, proposerSide } = req.body || {};
+  if (!topic || !String(topic).trim()) {
+    res.status(400).json({ error: 'topic is required' });
+    return;
+  }
+  const when = new Date(scheduledAt);
+  if (isNaN(when.getTime()) || when.getTime() <= Date.now()) {
+    res.status(400).json({ error: 'scheduledAt must be a future time' });
+    return;
+  }
+  const safeRounds = Math.min(12, Math.max(2, 2 * Math.round((Number(rounds) || 2) / 2)));
+  const safeDuration = Math.min(180, Math.max(45, Math.round(Number(roundDuration)) || 90));
+  const side = proposerSide === 'B' ? 'B' : 'A';
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO scheduled_battles (topic_id, proposer_id, proposer_side, topic, label_a, label_b, rounds, round_duration, scheduled_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+      [Number.isInteger(topicId) ? topicId : null, userId, side, String(topic).trim(),
+        (labelA && String(labelA).trim()) || 'Red', (labelB && String(labelB).trim()) || 'Blue',
+        safeRounds, safeDuration, when.toISOString()]
+    );
+    res.json({ id: rows[0].id });
+  } catch (e) {
+    console.error('schedule error:', e);
+    res.status(500).json({ error: 'failed to schedule battle' });
   }
 });
 

@@ -156,5 +156,23 @@ export async function initDb(): Promise<void> {
     );
   `);
 
-  console.log('🗄️  Postgres ready (users, votes, matches, tribes, forum)');
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS scheduled_battles (
+      id             BIGSERIAL PRIMARY KEY,
+      topic_id       BIGINT REFERENCES topics(id) ON DELETE SET NULL,
+      proposer_id    UUID REFERENCES users(id) ON DELETE SET NULL,
+      proposer_side  TEXT NOT NULL DEFAULT 'A',
+      topic          TEXT NOT NULL,
+      label_a        TEXT NOT NULL DEFAULT 'Red',
+      label_b        TEXT NOT NULL DEFAULT 'Blue',
+      rounds         INT NOT NULL DEFAULT 2,
+      round_duration INT NOT NULL DEFAULT 90,
+      scheduled_at   TIMESTAMPTZ NOT NULL,
+      status         TEXT NOT NULL DEFAULT 'scheduled',
+      match_id       TEXT,
+      created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+
+  console.log('🗄️  Postgres ready (users, votes, matches, tribes, forum, scheduled_battles)');
 }
