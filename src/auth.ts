@@ -10,6 +10,9 @@ const normalizeLocale = (l: unknown): string =>
 
 // Usernames: 3–20 chars, lowercase a-z 0-9 and underscore.
 const USERNAME_RE = /^[a-z0-9_]{3,20}$/;
+// How long a handle change is locked, and how long an old handle stays reserved.
+const HANDLE_COOLDOWN_DAYS = 30;
+const HANDLE_RESERVE_DAYS = 30;
 function normalizeUsername(u: unknown): string | null {
   const s = String(u ?? '').trim().toLowerCase();
   return USERNAME_RE.test(s) ? s : null;
@@ -19,7 +22,16 @@ async function usernameTaken(username: string, exceptUserId?: string): Promise<b
     `SELECT 1 FROM users WHERE username = $1 ${exceptUserId ? 'AND id <> $2' : ''}`,
     exceptUserId ? [username, exceptUserId] : [username]
   );
-  return rows.length > 0;
+  if (rows.length > 0) return true;
+  // Also reserved if another user changed away from this handle recently.
+  const { rows: hist } = await pool.query(
+    `SELECT 1 FROM handle_history
+       WHERE old_username = $1
+         AND changed_at > now() - ($2 || ' days')::interval
+         ${exceptUserId ? 'AND user_id <> $3' : ''}`,
+    exceptUserId ? [username, HANDLE_RESERVE_DAYS, exceptUserId] : [username, HANDLE_RESERVE_DAYS]
+  );
+  return hist.length > 0;
 }
 // Derive a free, valid username from a name/email seed.
 async function generateUsername(seed: string): Promise<string> {
@@ -275,7 +287,46 @@ authRouter.post('/username', async (req: Request, res: Response): Promise<void> 
     return;
   }
   try {
-    const { rows } = await pool.query('UPDATE users SET username = $1 WHERE id = $2 RETURNING *', [norm, userId]);
+    const cur = await pool.query(
+      'SELECT username, nickname_changed_at FROM users WHERE id = $1',
+      [userId]
+    );
+    const oldUsername: string | null = cur.rows[0]?.username ?? null;
+    const changedAt: Date | null = cur.rows[0]?.nickname_changed_at ?? null;
+
+    // No-op if unchanged.
+    if (oldUsername === norm) {
+      const { rows } = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+      res.json({ user: publicUser(rows[0]) });
+      return;
+    }
+
+    // Cooldown between handle changes.
+    if (changedAt) {
+      const nextAllowed = new Date(changedAt).getTime() + HANDLE_COOLDOWN_DAYS * 86400000;
+      if (Date.now() < nextAllowed) {
+        res.status(429).json({
+          error: 'handle was changed recently',
+          nextAllowedAt: new Date(nextAllowed).toISOString(),
+          cooldownDays: HANDLE_COOLDOWN_DAYS,
+        });
+        return;
+      }
+    }
+
+    const { rows } = await pool.query(
+      'UPDATE users SET username = $1, nickname_changed_at = now() WHERE id = $2 RETURNING *',
+      [norm, userId]
+    );
+    // Reserve the old handle so it can't be grabbed (and can redirect) for a while.
+    if (oldUsername) {
+      await pool.query(
+        `INSERT INTO handle_history (old_username, user_id, changed_at)
+           VALUES ($1, $2, now())
+         ON CONFLICT (old_username) DO UPDATE SET user_id = EXCLUDED.user_id, changed_at = now()`,
+        [oldUsername, userId]
+      );
+    }
     res.json({ user: publicUser(rows[0]) });
   } catch (e) {
     console.error('username update error:', e);

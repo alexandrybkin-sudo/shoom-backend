@@ -13,6 +13,8 @@ export interface User {
   vk_id: string | null;
   locale: string;
   username: string | null;
+  bio: string | null;
+  created_at?: string;
 }
 
 // Public shape returned to clients (never includes password_hash).
@@ -26,6 +28,8 @@ export function publicUser(u: any): User {
     vk_id: u.vk_id ?? null,
     locale: u.locale ?? 'en',
     username: u.username ?? null,
+    bio: u.bio ?? null,
+    created_at: u.created_at,
   };
 }
 
@@ -48,6 +52,10 @@ export async function initDb(): Promise<void> {
   // Unique @username handle.
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT;`);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS users_username_uniq ON users (username);`);
+  // Profile fields.
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname_changed_at TIMESTAMPTZ;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS opinion_map_public BOOLEAN NOT NULL DEFAULT true;`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS vote_events (
       id          BIGSERIAL PRIMARY KEY,
@@ -163,6 +171,29 @@ export async function initDb(): Promise<void> {
       target_id   BIGINT NOT NULL,
       created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (user_id, target_type, target_id)
+    );
+  `);
+
+  // User → user follows (separate from the polymorphic forum `follows`, whose
+  // target_id is BIGINT; user ids are UUIDs).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_follows (
+      follower_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      followee_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (follower_id, followee_id),
+      CHECK (follower_id <> followee_id)
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS user_follows_followee_idx ON user_follows (followee_id);`);
+
+  // Old @handles kept after a rename: reserves them against impersonation and lets
+  // /u/:old redirect to the current handle.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS handle_history (
+      old_username TEXT PRIMARY KEY,
+      user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      changed_at   TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
 
