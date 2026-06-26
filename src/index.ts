@@ -51,6 +51,8 @@ interface ChatMessage {
   text: string;
   isDonation: boolean;
   amount?: number;
+  // Side the author is backing (colors their nick in chat): A=red, B=blue, null=undecided/gray.
+  side?: 'A' | 'B' | null;
 }
 
 interface RoomState {
@@ -70,6 +72,10 @@ interface RoomState {
   labelB: string;
   debaterA: string | null;
   debaterB: string | null;
+  // Account ids of logged-in debaters (null = anonymous). LiveKit identity stays the
+  // anon `user-xxxx`; this is the stats key written into match_results at finalize.
+  debaterAUserId: string | null;
+  debaterBUserId: string | null;
   debaterAOnline: boolean;
   debaterBOnline: boolean;
   roundDuration: number;
@@ -127,6 +133,8 @@ function getOrCreateRoom(
       labelB,
       debaterA: null,
       debaterB: null,
+      debaterAUserId: null,
+      debaterBUserId: null,
       debaterAOnline: false,
       debaterBOnline: false,
       roundDuration,
@@ -304,13 +312,19 @@ async function finalizeMatch(roomId: string, r: RoomState) {
   io.to(roomId).emit('state_update', r);
 
   try {
+    const winnerUserId =
+      v.winnerSide === 'A' ? r.debaterAUserId
+      : v.winnerSide === 'B' ? r.debaterBUserId
+      : null;
     const ins = await pool.query(
       `INSERT INTO match_results
-         (match_id, room_id, topic, label_a, label_b, winner_side, final_share_a, final_share_b, swing_winner, swing_pct, total_voters)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         (match_id, room_id, topic, label_a, label_b, winner_side, final_share_a, final_share_b, swing_winner, swing_pct, total_voters,
+          debater_a_id, debater_b_id, winner_user_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        ON CONFLICT (match_id) DO NOTHING`,
       [r.matchId, roomId, r.topic, r.labelA, r.labelB, v.winnerSide,
-        v.finalShareA, v.finalShareB, v.swingWinner, v.swingPct, voters.size]
+        v.finalShareA, v.finalShareB, v.swingWinner, v.swingPct, voters.size,
+        r.debaterAUserId, r.debaterBUserId, winnerUserId]
     );
     // Bump tribe scores exactly once per match (only when the row was newly inserted).
     if (ins.rowCount && ins.rowCount > 0) {
@@ -465,21 +479,29 @@ app.post('/api/rooms/:roomId/join', (req, res) => {
     return;
   }
 
+  // Attribute the slot to the account when the joiner is logged in (cookie sent with
+  // credentials:'include'). Anonymous debaters leave the user id null.
+  const userId = getUserIdFromReq(req);
+
   if (room.debaterA === identity) {
+    if (userId) room.debaterAUserId = userId;
     res.json({ role: 'debater', slot: 'A' });
     return;
   }
   if (room.debaterB === identity) {
+    if (userId) room.debaterBUserId = userId;
     res.json({ role: 'debater', slot: 'B' });
     return;
   }
   if (!room.debaterA) {
     room.debaterA = identity;
+    if (userId) room.debaterAUserId = userId;
     res.json({ role: 'debater', slot: 'A' });
     return;
   }
   if (!room.debaterB) {
     room.debaterB = identity;
+    if (userId) room.debaterBUserId = userId;
     res.json({ role: 'debater', slot: 'B' });
     return;
   }
@@ -602,7 +624,24 @@ app.get('/api/token', async (req: Request, res: Response): Promise<void> => {
   }
 
   try {
-    const at = new AccessToken(apiKey, apiSecret, { identity: participantName });
+    // Resolve a human nickname for logged-in participants so tiles show @username
+    // instead of the anonymous LiveKit identity (user-xxxx). Identity itself stays the
+    // anon id — mic/camera turn-taking is keyed on it, so we don't touch it.
+    let displayName: string | undefined;
+    const uid = getUserIdFromReq(req);
+    if (uid) {
+      try {
+        const { rows } = await pool.query(
+          'SELECT username, display_name FROM users WHERE id = $1',
+          [uid]
+        );
+        if (rows[0]) displayName = rows[0].username || rows[0].display_name || undefined;
+      } catch (e) {
+        console.error('token name lookup error:', e);
+      }
+    }
+
+    const at = new AccessToken(apiKey, apiSecret, { identity: participantName, name: displayName });
     at.addGrant({
       roomJoin: true,
       room: roomName,
@@ -748,6 +787,10 @@ io.on('connection', (socket: Socket) => {
     if (identity && (room.debaterA === identity || room.debaterB === identity)) {
       vr.debaterUserIds.add(userId);
     }
+    // Attribute the slot to the account here too: the client skips /api/rooms/:id/join
+    // when its role is cached in sessionStorage, so the socket cookie is the reliable hook.
+    if (identity && room.debaterA === identity) room.debaterAUserId = userId;
+    if (identity && room.debaterB === identity) room.debaterBUserId = userId;
   }
 
   // Автостарт если оба дебатера онлайн — сначала розыгрыш монетки
@@ -868,7 +911,8 @@ io.on('connection', (socket: Socket) => {
       user: payload.user,
       text: payload.text,
       isDonation: payload.isDonation,
-      amount: payload.amount || 0
+      amount: payload.amount || 0,
+      side: payload.side === 'A' || payload.side === 'B' ? payload.side : null,
     };
 
     r.chatMessages.push(newMessage);
