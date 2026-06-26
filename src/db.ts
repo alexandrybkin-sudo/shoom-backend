@@ -74,9 +74,19 @@ export async function initDb(): Promise<void> {
       swing_winner  TEXT NOT NULL CHECK (swing_winner IN ('A','B','none')),
       swing_pct     NUMERIC NOT NULL,
       total_voters  INT NOT NULL,
+      -- Account ids of the two debaters and the winner (NULL = anonymous/legacy match).
+      -- Keyed on users.id (immutable UUID), so renaming a @username never loses stats.
+      -- ON DELETE SET NULL: a deleted account drops out of attribution but match history survives.
+      debater_a_id   UUID REFERENCES users(id) ON DELETE SET NULL,
+      debater_b_id   UUID REFERENCES users(id) ON DELETE SET NULL,
+      winner_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
       ended_at      TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
+  // For match_results rows that pre-date debater attribution.
+  await pool.query(`ALTER TABLE match_results ADD COLUMN IF NOT EXISTS debater_a_id   UUID REFERENCES users(id) ON DELETE SET NULL;`);
+  await pool.query(`ALTER TABLE match_results ADD COLUMN IF NOT EXISTS debater_b_id   UUID REFERENCES users(id) ON DELETE SET NULL;`);
+  await pool.query(`ALTER TABLE match_results ADD COLUMN IF NOT EXISTS winner_user_id UUID REFERENCES users(id) ON DELETE SET NULL;`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS tribe_season_scores (
