@@ -86,6 +86,7 @@ interface RoomState {
   matchFinalized: boolean;
   coinFlipResult: Player | null;
   coinFlipEndsAt: number | null;
+  protectedUntil: number | null;
   verdict: {
     winnerSide: 'A' | 'B' | 'tie';
     finalShareA: number;
@@ -140,6 +141,7 @@ function getOrCreateRoom(
       matchFinalized: false,
       coinFlipResult: null,
       coinFlipEndsAt: null,
+      protectedUntil: null,
       verdict: null,
       topicId,
     };
@@ -149,7 +151,8 @@ function getOrCreateRoom(
     // Таймаут 30 секунд — удаляем комнату если никто не подключился
     setTimeout(() => {
       const r = rooms[roomId];
-      if (r && !r.debaterAOnline && r.viewersCount === 0) {
+      const protectedNow = r && r.protectedUntil && Date.now() < r.protectedUntil;
+      if (r && !r.debaterAOnline && r.viewersCount === 0 && !protectedNow) {
         delete rooms[roomId];
         console.log(`🗑️ Room ${roomId} deleted (timeout, no one joined)`);
       }
@@ -168,7 +171,7 @@ function cleanupRoomIfEmpty(roomId: string) {
 
   const total = debatersCount + viewersCount;
 
-  if (total === 0) {
+  if (total === 0 && !(room.protectedUntil && Date.now() < room.protectedUntil)) {
     delete rooms[roomId];
     delete voteRuntime[roomId];
     console.log(`🗑️ Room ${roomId} deleted (empty)`);
@@ -985,7 +988,8 @@ setInterval(async () => {
         roomId = `${baseId}-${counter}`;
         counter++;
       }
-      getOrCreateRoom(roomId, s.topic, s.label_a, s.label_b, s.rounds, s.round_duration, s.topic_id ? Number(s.topic_id) : null);
+      const room = getOrCreateRoom(roomId, s.topic, s.label_a, s.label_b, s.rounds, s.round_duration, s.topic_id ? Number(s.topic_id) : null);
+      room.protectedUntil = Date.now() + 180000; // survive ~3 min so debaters can arrive
       await pool.query(`UPDATE scheduled_battles SET status = 'live', match_id = $1 WHERE id = $2`, [roomId, s.id]);
       console.log(`📅 Scheduled battle ${s.id} → live room ${roomId}`);
     }

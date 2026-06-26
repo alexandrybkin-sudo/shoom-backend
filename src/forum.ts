@@ -181,10 +181,12 @@ forumRouter.get('/home', async (req: Request, res: Response) => {
     );
 
     const scheduled = await pool.query(
-      `SELECT id, topic, label_a AS "labelA", label_b AS "labelB", scheduled_at AS "scheduledAt"
+      `SELECT id, topic, label_a AS "labelA", label_b AS "labelB", scheduled_at AS "scheduledAt",
+              status, match_id AS "matchId"
        FROM scheduled_battles
-       WHERE status = 'scheduled' AND scheduled_at > now()
-       ORDER BY scheduled_at ASC
+       WHERE (status = 'scheduled' AND scheduled_at > now())
+          OR (status = 'live' AND scheduled_at > now() - interval '20 minutes')
+       ORDER BY (status = 'live') DESC, scheduled_at ASC
        LIMIT 6`
     );
 
