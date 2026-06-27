@@ -68,7 +68,7 @@ profileRouter.get('/users/:handle/profile', async (req: Request, res: Response):
   }
 
   try {
-    const [counts, interests, camps, followsMe] = await Promise.all([
+    const [counts, interests, camps, followsMe, dstats, history, vstats] = await Promise.all([
       pool.query(
         `SELECT
            (SELECT count(*)::int FROM user_follows WHERE followee_id = $1) AS followers,
@@ -95,8 +95,55 @@ profileRouter.get('/users/:handle/profile', async (req: Request, res: Response):
       me
         ? pool.query('SELECT 1 FROM user_follows WHERE follower_id = $1 AND followee_id = $2', [me, u.id])
         : Promise.resolve({ rows: [] as any[] }),
+      // Debater record (from match_results, which stores both debater ids + winner).
+      pool.query(
+        `SELECT
+           count(*)::int AS battles,
+           count(*) FILTER (WHERE winner_user_id = $1)::int AS wins,
+           count(*) FILTER (WHERE winner_side = 'tie')::int AS ties,
+           count(*) FILTER (WHERE winner_side <> 'tie' AND winner_user_id IS DISTINCT FROM $1)::int AS losses
+         FROM match_results
+         WHERE debater_a_id = $1 OR debater_b_id = $1`,
+        [u.id]
+      ),
+      // Recent matches with the user's side, result and opponent.
+      pool.query(
+        `SELECT mr.match_id, mr.topic, mr.label_a, mr.label_b, mr.winner_side,
+                mr.final_share_a, mr.final_share_b, mr.total_voters, mr.ended_at,
+                CASE WHEN mr.debater_a_id = $1 THEN 'A' ELSE 'B' END AS my_side,
+                CASE WHEN mr.winner_side = 'tie' THEN 'tie'
+                     WHEN mr.winner_user_id = $1 THEN 'win'
+                     ELSE 'loss' END AS result,
+                opp.display_name AS opponent, opp.username AS opponent_handle
+           FROM match_results mr
+           LEFT JOIN users opp
+             ON opp.id = CASE WHEN mr.debater_a_id = $1 THEN mr.debater_b_id ELSE mr.debater_a_id END
+          WHERE mr.debater_a_id = $1 OR mr.debater_b_id = $1
+          ORDER BY mr.ended_at DESC
+          LIMIT 20`,
+        [u.id]
+      ),
+      // Viewer prediction accuracy: the user's final (last-window) vote per match
+      // vs the verdict, excluding ties.
+      pool.query(
+        `WITH last_vote AS (
+           SELECT DISTINCT ON (ve.match_id) ve.match_id, ve.side
+             FROM vote_events ve
+            WHERE ve.user_id = $1
+            ORDER BY ve.match_id, ve.window_idx DESC
+         )
+         SELECT
+           count(DISTINCT lv.match_id)::int AS voted_matches,
+           count(*) FILTER (WHERE mr.winner_side <> 'tie')::int AS predictions,
+           count(*) FILTER (WHERE mr.winner_side <> 'tie' AND lv.side = mr.winner_side)::int AS correct
+         FROM last_vote lv
+         JOIN match_results mr ON mr.match_id = lv.match_id`,
+        [u.id]
+      ),
     ]);
 
+    const ds = dstats.rows[0];
+    const vs = vstats.rows[0];
     res.json({
       id: u.id,
       handle: u.username,
@@ -111,6 +158,34 @@ profileRouter.get('/users/:handle/profile', async (req: Request, res: Response):
       isSelf: me === u.id,
       interests: interests.rows.map((r) => r.slug),
       camps: camps.rows,
+      debaterStats: {
+        battles: ds.battles,
+        wins: ds.wins,
+        losses: ds.losses,
+        ties: ds.ties,
+        winRate: ds.battles > 0 ? ds.wins / ds.battles : 0,
+      },
+      matchHistory: history.rows.map((r) => ({
+        matchId: r.match_id,
+        topic: r.topic,
+        labelA: r.label_a,
+        labelB: r.label_b,
+        winnerSide: r.winner_side,
+        finalShareA: Number(r.final_share_a),
+        finalShareB: Number(r.final_share_b),
+        totalVoters: r.total_voters,
+        endedAt: r.ended_at,
+        mySide: r.my_side,
+        result: r.result,
+        opponent: r.opponent ?? null,
+        opponentHandle: r.opponent_handle ?? null,
+      })),
+      viewerStats: {
+        votedMatches: vs.voted_matches,
+        predictions: vs.predictions,
+        correct: vs.correct,
+        accuracy: vs.predictions > 0 ? vs.correct / vs.predictions : 0,
+      },
     });
   } catch (e) {
     console.error('profile load error:', e);
