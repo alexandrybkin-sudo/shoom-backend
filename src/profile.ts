@@ -68,7 +68,7 @@ profileRouter.get('/users/:handle/profile', async (req: Request, res: Response):
   }
 
   try {
-    const [counts, interests, camps, followsMe, dstats, history, vstats] = await Promise.all([
+    const [counts, interests, camps, followsMe, dstats, history, vstats, opinion] = await Promise.all([
       pool.query(
         `SELECT
            (SELECT count(*)::int FROM user_follows WHERE followee_id = $1) AS followers,
@@ -140,10 +140,46 @@ profileRouter.get('/users/:handle/profile', async (req: Request, res: Response):
          JOIN match_results mr ON mr.match_id = lv.match_id`,
         [u.id]
       ),
+      // Opinion map: the user's stance per thread from their posts. side = the side
+      // they posted on most; conviction = how lopsided; strength = post count.
+      pool.query(
+        `SELECT t.slug, t.title, c.slug AS category,
+                count(*) FILTER (WHERE tp.side = 'A')::int AS na,
+                count(*) FILTER (WHERE tp.side = 'B')::int AS nb
+           FROM topic_posts tp
+           JOIN topics t ON t.id = tp.topic_id
+           JOIN categories c ON c.id = t.category_id
+          WHERE tp.user_id = $1
+          GROUP BY t.id, t.slug, t.title, c.slug
+          ORDER BY count(*) DESC
+          LIMIT 24`,
+        [u.id]
+      ),
     ]);
 
     const ds = dstats.rows[0];
     const vs = vstats.rows[0];
+
+    // Opinion map — stance per thread, overall lean, gated by privacy.
+    const omTopics = opinion.rows.map((r: any) => {
+      const w = r.na + r.nb;
+      return {
+        slug: r.slug,
+        title: r.title,
+        category: r.category,
+        side: r.na >= r.nb ? 'A' : 'B',
+        strength: w,
+        conviction: w > 0 ? Math.max(r.na, r.nb) / w : 0.5,
+      };
+    });
+    const totalW = omTopics.reduce((s, t) => s + t.strength, 0);
+    const forW = omTopics.filter((t) => t.side === 'A').reduce((s, t) => s + t.strength, 0);
+    const forPct = totalW > 0 ? Math.round((forW / totalW) * 100) : 50;
+    const omVisible = me === u.id || (u.opinion_map_public ?? true);
+    const opinionMap = omVisible
+      ? { topics: omTopics, forPct, total: omTopics.length }
+      : { hidden: true, total: omTopics.length };
+
     res.json({
       id: u.id,
       handle: u.username,
@@ -186,6 +222,7 @@ profileRouter.get('/users/:handle/profile', async (req: Request, res: Response):
         correct: vs.correct,
         accuracy: vs.predictions > 0 ? vs.correct / vs.predictions : 0,
       },
+      opinionMap,
     });
   } catch (e) {
     console.error('profile load error:', e);
