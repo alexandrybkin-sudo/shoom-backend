@@ -87,7 +87,7 @@ profileRouter.get('/users/:handle/profile', async (req: Request, res: Response):
            FROM topic_posts tp
            JOIN topics t ON t.id = tp.topic_id
            JOIN categories c ON c.id = t.category_id
-          WHERE tp.user_id = $1
+          WHERE tp.user_id = $1 AND tp.hidden_at IS NULL
           ORDER BY t.id, tp.created_at DESC
           LIMIT 12`,
         [u.id]
@@ -149,7 +149,7 @@ profileRouter.get('/users/:handle/profile', async (req: Request, res: Response):
            FROM topic_posts tp
            JOIN topics t ON t.id = tp.topic_id
            JOIN categories c ON c.id = t.category_id
-          WHERE tp.user_id = $1
+          WHERE tp.user_id = $1 AND tp.hidden_at IS NULL
           GROUP BY t.id, t.slug, t.title, c.slug
           ORDER BY count(*) DESC
           LIMIT 24`,

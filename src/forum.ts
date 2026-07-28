@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { pool } from './db';
 import { getUserIdFromReq } from './auth';
+import { moderate, enqueuePost } from './moderation';
 
 // Heat weights (ticket): posts*1 + live*10 + viewers*0.5 + battles*3.
 // Implemented as a stored score bumped on events + gentle decay (cheap, non self-zeroing).
@@ -253,7 +254,7 @@ forumRouter.get('/topics/:slug', async (req: Request, res: Response): Promise<vo
     const posts = await pool.query(
       `SELECT p.side, p.body, p.created_at AS "createdAt", u.display_name AS "author", u.username AS "authorHandle", u.avatar_url AS "avatar"
        FROM topic_posts p JOIN users u ON u.id = p.user_id
-       WHERE p.topic_id = $1
+       WHERE p.topic_id = $1 AND p.hidden_at IS NULL
        ORDER BY p.created_at ASC
        LIMIT $2 OFFSET $3`,
       [topic.id, pageSize, (page - 1) * pageSize]
@@ -282,9 +283,20 @@ forumRouter.post('/topics', async (req: Request, res: Response): Promise<void> =
       res.status(404).json({ error: 'category not found' });
       return;
     }
-    const slug = `${slugify(String(title))}-${Math.random().toString(36).slice(2, 6)}`;
     const topicLang = ['en', 'ru', 'es'].includes(String(lang)) ? String(lang) : 'en';
     const labels = SIDE_LABELS[topicLang];
+
+    // AI gate: a blocked topic is never created (fails open if the model is down).
+    const verdict = await moderate(
+      { kind: 'topic', lang: topicLang, title: String(title).trim(), sideA: sideA || undefined, sideB: sideB || undefined },
+      userId
+    );
+    if (verdict.verdict === 'block') {
+      res.status(422).json({ error: 'rejected by moderation', categories: verdict.categories });
+      return;
+    }
+
+    const slug = `${slugify(String(title))}-${Math.random().toString(36).slice(2, 6)}`;
     const t = await pool.query(
       `INSERT INTO topics (category_id, slug, title, lang, side_a_label, side_b_label, created_by, is_seed)
        VALUES ($1,$2,$3,$4,$5,$6,$7,false) RETURNING id, slug`,
@@ -361,6 +373,15 @@ forumRouter.post('/schedules', async (req: Request, res: Response): Promise<void
   const safeDuration = Math.min(180, Math.max(45, Math.round(Number(roundDuration)) || 90));
   const side = proposerSide === 'B' ? 'B' : 'A';
   try {
+    const verdict = await moderate(
+      { kind: 'schedule', title: String(topic).trim(), sideA: labelA || undefined, sideB: labelB || undefined },
+      userId
+    );
+    if (verdict.verdict === 'block') {
+      res.status(422).json({ error: 'rejected by moderation', categories: verdict.categories });
+      return;
+    }
+
     const { rows } = await pool.query(
       `INSERT INTO scheduled_battles (topic_id, proposer_id, proposer_side, topic, label_a, label_b, rounds, round_duration, scheduled_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
@@ -440,15 +461,19 @@ forumRouter.post('/topics/:id/posts', async (req: Request, res: Response): Promi
     return;
   }
   try {
-    const exists = await pool.query('SELECT id FROM topics WHERE id = $1', [topicId]);
+    const exists = await pool.query('SELECT id, lang FROM topics WHERE id = $1', [topicId]);
     if (!exists.rows[0]) {
       res.status(404).json({ error: 'topic not found' });
       return;
     }
-    await pool.query(
-      'INSERT INTO topic_posts (topic_id, user_id, side, body) VALUES ($1,$2,$3,$4)',
-      [topicId, userId, side, String(body).trim().slice(0, 2000)]
+    const text = String(body).trim().slice(0, 2000);
+    const ins = await pool.query(
+      'INSERT INTO topic_posts (topic_id, user_id, side, body) VALUES ($1,$2,$3,$4) RETURNING id',
+      [topicId, userId, side, text]
     );
+    // Replies publish immediately and are screened out of band (batched), so the
+    // thread never blocks on the model. A blocked post is hidden afterwards.
+    enqueuePost(ins.rows[0].id, text, exists.rows[0].lang, userId);
     // Bump denormalized counters (seed values are a base, so increment rather than recompute).
     // participants only grows when this is the author's first post in the topic.
     await pool.query(
