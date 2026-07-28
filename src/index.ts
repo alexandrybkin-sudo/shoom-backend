@@ -9,6 +9,7 @@ import { randomUUID } from 'crypto';
 import { initDb, pool } from './db';
 import { authRouter, getUserIdFromReq, getUserIdFromCookieHeader } from './auth';
 import { profileRouter, UPLOADS_DIR } from './profile';
+import { moderate, moderationEnabled } from './moderation';
 import {
   computeVerdict,
   tallyVotes,
@@ -430,10 +431,27 @@ app.get('/api/rooms', (req, res) => {
   res.json(roomList);
 });
 
-app.post('/api/rooms', (req, res) => {
+app.post('/api/rooms', async (req: Request, res: Response): Promise<void> => {
+  // Creating a battle now requires an account: an anonymous endpoint let anyone
+  // put arbitrary text on the home page, and it would also bypass moderation.
+  const creatorId = getUserIdFromReq(req);
+  if (!creatorId) {
+    res.status(401).json({ error: 'sign in to create a battle' });
+    return;
+  }
+
   const { topic, labelA, labelB, roundsCount, roundDuration, topicId } = req.body;
   if (!topic) {
     res.status(400).json({ error: 'topic is required' });
+    return;
+  }
+
+  const verdict = await moderate(
+    { kind: 'room', title: String(topic).trim(), sideA: labelA || undefined, sideB: labelB || undefined },
+    creatorId
+  );
+  if (verdict.verdict === 'block') {
+    res.status(422).json({ error: 'rejected by moderation', categories: verdict.categories });
     return;
   }
 
@@ -1056,5 +1074,10 @@ initDb()
     httpServer.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`🛡️  CORS Allowed Origins: ${ALLOWED_ORIGINS.join(', ')}`);
+      console.log(
+        moderationEnabled()
+          ? '🤖 AI moderation: ON (DeepSeek)'
+          : '🤖 AI moderation: OFF — set DEEPSEEK_API_KEY to enable'
+      );
     });
   });

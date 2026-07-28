@@ -197,6 +197,30 @@ export async function initDb(): Promise<void> {
     );
   `);
 
+  // AI moderation audit log. Doubles as the cache: a repeated content_hash is
+  // answered from here instead of calling the model again.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS moderation_events (
+      id               BIGSERIAL PRIMARY KEY,
+      content_hash     TEXT NOT NULL,
+      kind             TEXT NOT NULL,
+      text             TEXT NOT NULL,
+      verdict          TEXT NOT NULL,
+      categories       TEXT[] NOT NULL DEFAULT '{}',
+      confidence       NUMERIC,
+      prompt_injection BOOLEAN NOT NULL DEFAULT false,
+      note             TEXT,
+      model            TEXT,
+      latency_ms       INT,
+      user_id          UUID REFERENCES users(id) ON DELETE SET NULL,
+      created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS moderation_events_hash_idx ON moderation_events (content_hash);`);
+  // Replies are screened after publication, so they need a "hidden" marker.
+  await pool.query(`ALTER TABLE topic_posts ADD COLUMN IF NOT EXISTS hidden_at TIMESTAMPTZ;`);
+  await pool.query(`ALTER TABLE topic_posts ADD COLUMN IF NOT EXISTS moderation_categories TEXT[];`);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS scheduled_battles (
       id             BIGSERIAL PRIMARY KEY,
