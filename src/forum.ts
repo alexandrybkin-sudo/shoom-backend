@@ -252,14 +252,22 @@ forumRouter.get('/topics/:slug', async (req: Request, res: Response): Promise<vo
     }
     const topic = t.rows[0];
     const posts = await pool.query(
-      `SELECT p.side, p.body, p.created_at AS "createdAt", u.display_name AS "author", u.username AS "authorHandle", u.avatar_url AS "avatar"
+      `SELECT p.side, p.body, p.kind, p.prev_side AS "prevSide", p.created_at AS "createdAt",
+              u.display_name AS "author", u.username AS "authorHandle", u.avatar_url AS "avatar"
        FROM topic_posts p JOIN users u ON u.id = p.user_id
        WHERE p.topic_id = $1 AND p.hidden_at IS NULL
        ORDER BY p.created_at ASC
        LIMIT $2 OFFSET $3`,
       [topic.id, pageSize, (page - 1) * pageSize]
     );
-    res.json({ topic, posts: posts.rows, hasMore: posts.rows.length === pageSize });
+    // The viewer's own stance drives the composer and the "switch side" button.
+    const me = getUserIdFromReq(req);
+    let myStance: string | null = null;
+    if (me) {
+      const s = await pool.query('SELECT side FROM topic_stances WHERE topic_id = $1 AND user_id = $2', [topic.id, me]);
+      myStance = s.rows[0]?.side ?? null;
+    }
+    res.json({ topic, posts: posts.rows, myStance, hasMore: posts.rows.length === pageSize });
   } catch (e) {
     console.error('forum topic error:', e);
     res.status(500).json({ error: 'failed to load topic' });
@@ -456,8 +464,8 @@ forumRouter.post('/topics/:id/posts', async (req: Request, res: Response): Promi
   }
   const topicId = parseInt(String(req.params.id), 10);
   const { side, body } = req.body || {};
-  if ((side !== 'A' && side !== 'B') || !body || !String(body).trim()) {
-    res.status(400).json({ error: 'side (A/B) and body are required' });
+  if (!['A', 'B', 'N'].includes(String(side)) || !body || !String(body).trim()) {
+    res.status(400).json({ error: 'side (A/B/N) and body are required' });
     return;
   }
   try {
@@ -466,6 +474,23 @@ forumRouter.post('/topics/:id/posts', async (req: Request, res: Response): Promi
       res.status(404).json({ error: 'topic not found' });
       return;
     }
+    // Writing under a different side than last time is itself an event: record the
+    // switch so the thread shows "X switched blue → red" before the new post.
+    const prev = await pool.query('SELECT side FROM topic_stances WHERE topic_id = $1 AND user_id = $2', [topicId, userId]);
+    const prevSide: string | null = prev.rows[0]?.side ?? null;
+    if (prevSide && prevSide !== side) {
+      await pool.query(
+        `INSERT INTO topic_posts (topic_id, user_id, side, body, kind, prev_side)
+         VALUES ($1,$2,$3,'','side_change',$4)`,
+        [topicId, userId, side, prevSide]
+      );
+    }
+    await pool.query(
+      `INSERT INTO topic_stances (topic_id, user_id, side) VALUES ($1,$2,$3)
+       ON CONFLICT (topic_id, user_id) DO UPDATE SET side = EXCLUDED.side, updated_at = now()`,
+      [topicId, userId, side]
+    );
+
     const text = String(body).trim().slice(0, 2000);
     const ins = await pool.query(
       'INSERT INTO topic_posts (topic_id, user_id, side, body) VALUES ($1,$2,$3,$4) RETURNING id',
@@ -490,5 +515,51 @@ forumRouter.post('/topics/:id/posts', async (req: Request, res: Response): Promi
   } catch (e) {
     console.error('create post error:', e);
     res.status(500).json({ error: 'failed to post' });
+  }
+});
+
+// Switch sides in a thread without writing a post. The switch itself is public:
+// it lands in the thread as a system entry.
+forumRouter.post('/topics/:id/stance', async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserIdFromReq(req);
+  if (!userId) {
+    res.status(401).json({ error: 'sign in to pick a side' });
+    return;
+  }
+  const topicId = parseInt(String(req.params.id), 10);
+  const side = String(req.body?.side);
+  if (!['A', 'B', 'N'].includes(side)) {
+    res.status(400).json({ error: 'side must be A, B or N' });
+    return;
+  }
+  try {
+    const exists = await pool.query('SELECT id FROM topics WHERE id = $1', [topicId]);
+    if (!exists.rows[0]) {
+      res.status(404).json({ error: 'topic not found' });
+      return;
+    }
+    const prev = await pool.query('SELECT side FROM topic_stances WHERE topic_id = $1 AND user_id = $2', [topicId, userId]);
+    const prevSide: string | null = prev.rows[0]?.side ?? null;
+    if (prevSide === side) {
+      res.json({ side, changed: false });
+      return;
+    }
+    await pool.query(
+      `INSERT INTO topic_stances (topic_id, user_id, side) VALUES ($1,$2,$3)
+       ON CONFLICT (topic_id, user_id) DO UPDATE SET side = EXCLUDED.side, updated_at = now()`,
+      [topicId, userId, side]
+    );
+    // Only announce an actual switch, not the first time someone picks a side.
+    if (prevSide) {
+      await pool.query(
+        `INSERT INTO topic_posts (topic_id, user_id, side, body, kind, prev_side)
+         VALUES ($1,$2,$3,'','side_change',$4)`,
+        [topicId, userId, side, prevSide]
+      );
+    }
+    res.json({ side, changed: true });
+  } catch (e) {
+    console.error('stance error:', e);
+    res.status(500).json({ error: 'failed to set stance' });
   }
 });

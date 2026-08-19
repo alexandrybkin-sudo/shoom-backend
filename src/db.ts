@@ -221,6 +221,23 @@ export async function initDb(): Promise<void> {
   await pool.query(`ALTER TABLE topic_posts ADD COLUMN IF NOT EXISTS hidden_at TIMESTAMPTZ;`);
   await pool.query(`ALTER TABLE topic_posts ADD COLUMN IF NOT EXISTS moderation_categories TEXT[];`);
 
+  // Stances: a user picks a side per thread — 'A' (red), 'B' (blue) or 'N' (neutral/grey).
+  // Posts keep the side they were written under, so history keeps its colours.
+  await pool.query(`ALTER TABLE topic_posts DROP CONSTRAINT IF EXISTS topic_posts_side_check;`);
+  await pool.query(`ALTER TABLE topic_posts ADD CONSTRAINT topic_posts_side_check CHECK (side IN ('A','B','N'));`);
+  // kind='side_change' rows are system entries rendered as "X switched blue → red".
+  await pool.query(`ALTER TABLE topic_posts ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'post';`);
+  await pool.query(`ALTER TABLE topic_posts ADD COLUMN IF NOT EXISTS prev_side TEXT;`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS topic_stances (
+      topic_id   BIGINT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+      user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      side       TEXT NOT NULL CHECK (side IN ('A','B','N')),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (topic_id, user_id)
+    );
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS scheduled_battles (
       id             BIGSERIAL PRIMARY KEY,
