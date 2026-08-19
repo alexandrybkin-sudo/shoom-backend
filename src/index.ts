@@ -53,8 +53,12 @@ interface ChatMessage {
   text: string;
   isDonation: boolean;
   amount?: number;
-  // Side the author is backing (colors their nick in chat): A=red, B=blue, null=undecided/gray.
-  side?: 'A' | 'B' | null;
+  // Side the author is backing (colors their nick in chat): A=red, B=blue,
+  // 'N'/null = neutral (grey).
+  side?: 'A' | 'B' | 'N' | null;
+  // 'side_change' entries are system lines: "X switched blue → red".
+  kind?: 'msg' | 'side_change';
+  prevSide?: 'A' | 'B' | 'N' | null;
 }
 
 interface RoomState {
@@ -78,6 +82,9 @@ interface RoomState {
   // anon `user-xxxx`; this is the stats key written into match_results at finalize.
   debaterAUserId: string | null;
   debaterBUserId: string | null;
+  // Declared stance per viewer (account id → side). Debaters are implicitly their
+  // own slot. Drives nick colour in chat and the "switched sides" announcements.
+  positions: Record<string, 'A' | 'B' | 'N'>;
   debaterAOnline: boolean;
   debaterBOnline: boolean;
   roundDuration: number;
@@ -109,6 +116,14 @@ interface RoomState {
 // --- Multi-Room Store ---
 const rooms: Record<string, RoomState> = {};
 
+/** A user's stance in a room: debaters are their slot, viewers their declared side. */
+function positionOf(room: RoomState, userId: string | null): 'A' | 'B' | 'N' | null {
+  if (!userId) return null;
+  if (room.debaterAUserId === userId) return 'A';
+  if (room.debaterBUserId === userId) return 'B';
+  return room.positions[userId] ?? null;
+}
+
 function getOrCreateRoom(
   roomId: string,
   topic = '',
@@ -137,6 +152,7 @@ function getOrCreateRoom(
       debaterB: null,
       debaterAUserId: null,
       debaterBUserId: null,
+      positions: {},
       debaterAOnline: false,
       debaterBOnline: false,
       roundDuration,
@@ -936,7 +952,9 @@ io.on('connection', (socket: Socket) => {
       text: payload.text,
       isDonation: payload.isDonation,
       amount: payload.amount || 0,
-      side: payload.side === 'A' || payload.side === 'B' ? payload.side : null,
+      // Server-side stance, not whatever the client claims.
+      side: positionOf(r, userId),
+      kind: 'msg',
     };
 
     r.chatMessages.push(newMessage);
@@ -944,6 +962,38 @@ io.on('connection', (socket: Socket) => {
     if (r.chatMessages.length > 50) r.chatMessages = r.chatMessages.slice(-50);
 
     io.to(roomId).emit('chat_update', newMessage);
+  });
+
+  // Viewers declare (or switch) the side they back. A switch is announced in chat.
+  socket.on('set_position', (payload) => {
+    const r = rooms[roomId];
+    if (!r || !userId) return;
+    const next = payload?.side;
+    if (next !== 'A' && next !== 'B' && next !== 'N') return;
+    // Debaters are locked to the slot they're arguing.
+    if (r.debaterAUserId === userId || r.debaterBUserId === userId) return;
+
+    const prev = r.positions[userId] ?? null;
+    if (prev === next) return;
+    r.positions[userId] = next;
+
+    // Only a real switch is news; picking a side for the first time is not.
+    if (prev) {
+      const sysMsg: ChatMessage = {
+        id: Date.now().toString() + Math.random().toString(36).slice(2),
+        user: String(payload.user || 'Guest').slice(0, 40),
+        text: '',
+        isDonation: false,
+        amount: 0,
+        side: next,
+        kind: 'side_change',
+        prevSide: prev,
+      };
+      r.chatMessages.push(sysMsg);
+      if (r.chatMessages.length > 50) r.chatMessages = r.chatMessages.slice(-50);
+      io.to(roomId).emit('chat_update', sysMsg);
+    }
+    socket.emit('position_ack', { side: next });
   });
 
   socket.on('send_reaction', (payload) => {
