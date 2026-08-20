@@ -5,6 +5,7 @@ services:
       args:
         NEXT_PUBLIC_LIVEKIT_URL: ${NEXT_PUBLIC_LIVEKIT_URL}
         NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL}
+        NEXT_PUBLIC_YM_ID: ${NEXT_PUBLIC_YM_ID}
     restart: always
     expose:
       - "3000"
