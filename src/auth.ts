@@ -109,13 +109,13 @@ async function findUserById(id: string) {
 
 // Upsert a social user by provider id, falling back to email match.
 async function upsertSocialUser(opts: {
-  provider: 'google' | 'vk';
+  provider: 'yandex' | 'vk';
   providerId: string;
   email: string | null;
   displayName: string;
   avatarUrl: string | null;
 }) {
-  const col = opts.provider === 'google' ? 'google_id' : 'vk_id';
+  const col = opts.provider === 'yandex' ? 'yandex_id' : 'vk_id';
 
   let { rows } = await pool.query(`SELECT * FROM users WHERE ${col} = $1`, [opts.providerId]);
   if (rows[0]) return rows[0];
@@ -334,66 +334,77 @@ authRouter.post('/username', async (req: Request, res: Response): Promise<void> 
   }
 });
 
-// --- Google OAuth ---
+// --- Yandex OAuth ---
 
-authRouter.get('/google', (_req: Request, res: Response) => {
-  const clientId = process.env.GOOGLE_CLIENT_ID;
+authRouter.get('/yandex', (_req: Request, res: Response) => {
+  const clientId = process.env.YANDEX_CLIENT_ID;
   if (!clientId) {
-    res.status(501).json({ error: 'Google OAuth not configured' });
+    res.status(501).json({ error: 'Yandex OAuth not configured' });
     return;
   }
   const params = new URLSearchParams({
     client_id: clientId,
-    redirect_uri: `${REDIRECT_BASE}/api/auth/google/callback`,
+    redirect_uri: `${REDIRECT_BASE}/api/auth/yandex/callback`,
     response_type: 'code',
-    scope: 'openid email profile',
-    access_type: 'online',
-    prompt: 'select_account',
   });
-  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+  res.redirect(`https://oauth.yandex.ru/authorize?${params}`);
 });
 
-authRouter.get('/google/callback', async (req: Request, res: Response) => {
+authRouter.get('/yandex/callback', async (req: Request, res: Response) => {
   try {
     const code = req.query.code as string;
-    const clientId = process.env.GOOGLE_CLIENT_ID;
-    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    const clientId = process.env.YANDEX_CLIENT_ID;
+    const clientSecret = process.env.YANDEX_CLIENT_SECRET;
     if (!code || !clientId || !clientSecret) {
-      res.status(400).send('Google OAuth misconfigured');
+      res.status(400).send('Yandex OAuth misconfigured');
       return;
     }
 
-    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    const tokenRes = await fetch('https://oauth.yandex.ru/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
+        grant_type: 'authorization_code',
         code,
         client_id: clientId,
         client_secret: clientSecret,
-        redirect_uri: `${REDIRECT_BASE}/api/auth/google/callback`,
-        grant_type: 'authorization_code',
+        redirect_uri: `${REDIRECT_BASE}/api/auth/yandex/callback`,
       }),
     });
     const tokenData: any = await tokenRes.json();
+    if (!tokenData.access_token) {
+      throw new Error('no yandex access_token: ' + JSON.stringify(tokenData));
+    }
 
-    const infoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    const infoRes = await fetch('https://login.yandex.ru/info?format=json', {
+      headers: { Authorization: `OAuth ${tokenData.access_token}` },
     });
     const info: any = await infoRes.json();
 
+    const displayName =
+      info.display_name ||
+      info.real_name ||
+      [info.first_name, info.last_name].filter(Boolean).join(' ') ||
+      info.login ||
+      'Player';
+    const avatarUrl =
+      info.default_avatar_id && !info.is_avatar_empty
+        ? `https://avatars.yandex.net/get-yapic/${info.default_avatar_id}/islands-200`
+        : null;
+
     const user = await upsertSocialUser({
-      provider: 'google',
-      providerId: info.sub,
-      email: info.email || null,
-      displayName: info.name || info.email?.split('@')[0] || 'Player',
-      avatarUrl: info.picture || null,
+      provider: 'yandex',
+      providerId: String(info.id),
+      email: info.default_email || (info.emails && info.emails[0]) || null,
+      displayName,
+      avatarUrl,
     });
 
     setAuthCookie(res, signToken(user));
     res.redirect(FRONTEND_URL);
   } catch (e) {
-    console.error('google callback error:', e);
-    res.redirect(`${FRONTEND_URL}/login?error=google`);
+    console.error('yandex callback error:', e);
+    res.redirect(`${FRONTEND_URL}/login?error=yandex`);
   }
 });
 
