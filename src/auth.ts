@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { pool, publicUser, User } from './db';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-insecure-secret-change-me';
@@ -109,13 +110,13 @@ async function findUserById(id: string) {
 
 // Upsert a social user by provider id, falling back to email match.
 async function upsertSocialUser(opts: {
-  provider: 'yandex' | 'vk';
+  provider: 'yandex' | 'telegram';
   providerId: string;
   email: string | null;
   displayName: string;
   avatarUrl: string | null;
 }) {
-  const col = opts.provider === 'yandex' ? 'yandex_id' : 'vk_id';
+  const col = opts.provider === 'yandex' ? 'yandex_id' : 'telegram_id';
 
   let { rows } = await pool.query(`SELECT * FROM users WHERE ${col} = $1`, [opts.providerId]);
   if (rows[0]) return rows[0];
@@ -408,69 +409,71 @@ authRouter.get('/yandex/callback', async (req: Request, res: Response) => {
   }
 });
 
-// --- VK OAuth ---
+// --- Telegram Login (widget) ---
+// No OAuth redirect: the Telegram Login Widget renders a button client-side and,
+// on success, GETs our callback with signed user fields (id, first_name, …, hash).
+// We verify the hash with HMAC-SHA256 keyed by SHA256(bot_token) per Telegram's spec.
 
-authRouter.get('/vk', (_req: Request, res: Response) => {
-  const clientId = process.env.VK_CLIENT_ID;
-  if (!clientId) {
-    res.status(501).json({ error: 'VK OAuth not configured' });
-    return;
-  }
-  const params = new URLSearchParams({
-    client_id: clientId,
-    redirect_uri: `${REDIRECT_BASE}/api/auth/vk/callback`,
-    response_type: 'code',
-    scope: 'email',
-    display: 'page',
-    v: '5.131',
-  });
-  res.redirect(`https://oauth.vk.com/authorize?${params}`);
+// Public config so the frontend can render the widget (bot username is not a secret).
+authRouter.get('/telegram/config', (_req: Request, res: Response) => {
+  res.json({ bot: process.env.TELEGRAM_BOT_USERNAME || null });
 });
 
-authRouter.get('/vk/callback', async (req: Request, res: Response) => {
+function verifyTelegramAuth(data: Record<string, string>, botToken: string): boolean {
+  const { hash, ...fields } = data;
+  if (!hash) return false;
+  const checkString = Object.keys(fields)
+    .sort()
+    .map((k) => `${k}=${fields[k]}`)
+    .join('\n');
+  const secret = crypto.createHash('sha256').update(botToken).digest();
+  const hmac = crypto.createHmac('sha256', secret).update(checkString).digest('hex');
+  // Constant-time compare.
+  const a = Buffer.from(hmac, 'hex');
+  const b = Buffer.from(String(hash), 'hex');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+authRouter.get('/telegram/callback', async (req: Request, res: Response) => {
   try {
-    const code = req.query.code as string;
-    const clientId = process.env.VK_CLIENT_ID;
-    const clientSecret = process.env.VK_CLIENT_SECRET;
-    if (!code || !clientId || !clientSecret) {
-      res.status(400).send('VK OAuth misconfigured');
+    const botToken = process.env.TELEGRAM_BOT_TOKEN;
+    if (!botToken) {
+      res.status(501).send('Telegram login not configured');
+      return;
+    }
+    // Collect the flat string fields Telegram appends to the query.
+    const data: Record<string, string> = {};
+    for (const [k, v] of Object.entries(req.query)) {
+      if (typeof v === 'string') data[k] = v;
+    }
+    if (!verifyTelegramAuth(data, botToken)) {
+      res.redirect(`${FRONTEND_URL}/login?error=telegram`);
+      return;
+    }
+    // Reject stale payloads (replay guard): auth_date older than 24h.
+    const authDate = Number(data.auth_date || 0);
+    if (!authDate || Date.now() / 1000 - authDate > 86400) {
+      res.redirect(`${FRONTEND_URL}/login?error=telegram`);
       return;
     }
 
-    const tokenParams = new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      redirect_uri: `${REDIRECT_BASE}/api/auth/vk/callback`,
-      code,
-    });
-    const tokenRes = await fetch(`https://oauth.vk.com/access_token?${tokenParams}`);
-    const tokenData: any = await tokenRes.json();
-    if (!tokenData.access_token) {
-      throw new Error('no vk access_token: ' + JSON.stringify(tokenData));
-    }
-
-    const infoParams = new URLSearchParams({
-      user_ids: String(tokenData.user_id),
-      fields: 'photo_200',
-      access_token: tokenData.access_token,
-      v: '5.131',
-    });
-    const infoRes = await fetch(`https://api.vk.com/method/users.get?${infoParams}`);
-    const infoData: any = await infoRes.json();
-    const p = infoData.response?.[0] || {};
+    const displayName =
+      [data.first_name, data.last_name].filter(Boolean).join(' ') ||
+      data.username ||
+      'TG Player';
 
     const user = await upsertSocialUser({
-      provider: 'vk',
-      providerId: String(tokenData.user_id),
-      email: tokenData.email || null,
-      displayName: [p.first_name, p.last_name].filter(Boolean).join(' ') || 'VK Player',
-      avatarUrl: p.photo_200 || null,
+      provider: 'telegram',
+      providerId: String(data.id),
+      email: null, // Telegram never returns email
+      displayName,
+      avatarUrl: data.photo_url || null,
     });
 
     setAuthCookie(res, signToken(user));
     res.redirect(FRONTEND_URL);
   } catch (e) {
-    console.error('vk callback error:', e);
-    res.redirect(`${FRONTEND_URL}/login?error=vk`);
+    console.error('telegram callback error:', e);
+    res.redirect(`${FRONTEND_URL}/login?error=telegram`);
   }
 });

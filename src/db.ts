@@ -10,7 +10,7 @@ export interface User {
   display_name: string;
   avatar_url: string | null;
   yandex_id: string | null;
-  vk_id: string | null;
+  telegram_id: string | null;
   locale: string;
   username: string | null;
   bio: string | null;
@@ -25,7 +25,7 @@ export function publicUser(u: any): User {
     display_name: u.display_name,
     avatar_url: u.avatar_url ?? null,
     yandex_id: u.yandex_id ?? null,
-    vk_id: u.vk_id ?? null,
+    telegram_id: u.telegram_id ?? null,
     locale: u.locale ?? 'en',
     username: u.username ?? null,
     bio: u.bio ?? null,
@@ -55,6 +55,9 @@ export async function initDb(): Promise<void> {
   // Yandex OAuth id (replaces Google).
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS yandex_id TEXT;`);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS users_yandex_uniq ON users (yandex_id);`);
+  // Telegram Login id (replaces VK).
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id TEXT;`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS users_telegram_uniq ON users (telegram_id);`);
   // Profile fields.
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname_changed_at TIMESTAMPTZ;`);
