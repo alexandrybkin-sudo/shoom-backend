@@ -8,7 +8,6 @@ import { getUserIdFromReq } from './auth';
 // notifications require an explicit opt-in via a /start deep link (not Login alone).
 
 const SITE = process.env.FRONTEND_URL || 'https://shoom.fun';
-const API_BASE = process.env.OAUTH_REDIRECT_BASE || SITE; // backend is same host behind nginx
 
 export function telegramEnabled(): boolean {
   return !!process.env.TELEGRAM_BOT_TOKEN;
@@ -16,19 +15,14 @@ export function telegramEnabled(): boolean {
 function botUsername(): string | null {
   return process.env.TELEGRAM_BOT_USERNAME || null;
 }
-// Deterministic webhook secret (no extra env): Telegram echoes it back in a header.
-export function webhookSecret(): string {
-  const t = process.env.TELEGRAM_BOT_TOKEN || '';
-  return crypto.createHash('sha256').update(t + ':webhook').digest('hex').slice(0, 40);
-}
-
-async function tgApi(method: string, payload: unknown): Promise<any> {
+async function tgApi(method: string, payload: unknown, timeoutMs = 15000): Promise<any> {
   if (!telegramEnabled()) return null;
   try {
     const r = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/${method}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     return await r.json();
   } catch (e) {
@@ -186,15 +180,10 @@ telegramRouter.post('/disconnect', async (req: Request, res: Response) => {
   }
 });
 
-// Telegram → us. Secured by the secret_token header we set with setWebhook.
-telegramRouter.post('/webhook', async (req: Request, res: Response) => {
-  if (req.get('X-Telegram-Bot-Api-Secret-Token') !== webhookSecret()) {
-    res.sendStatus(403);
-    return;
-  }
-  res.sendStatus(200); // ack fast; process after
+// Process one incoming bot message. Only /start (with a deep-link token) is
+// actionable: it links the Telegram chat to the account that generated the token.
+async function handleTelegramMessage(msg: any): Promise<void> {
   try {
-    const msg = req.body?.message;
     const text: string = msg?.text || '';
     const chatId = msg?.chat?.id;
     if (!chatId || !text.startsWith('/start')) return;
@@ -236,19 +225,44 @@ telegramRouter.post('/webhook', async (req: Request, res: Response) => {
       es: '✅ ¡Listo! Te avisaremos cuando alguien responda en tus temas.',
     }[l]);
   } catch (e) {
-    console.error('telegram webhook error:', e);
+    console.error('telegram message error:', e);
   }
-});
+}
 
-// Register the webhook with Telegram on boot (idempotent).
-export async function setTelegramWebhook(): Promise<void> {
-  if (!telegramEnabled()) return;
-  const url = `${API_BASE}/api/telegram/webhook`;
-  const r = await tgApi('setWebhook', {
-    url,
-    secret_token: webhookSecret(),
-    allowed_updates: ['message'],
+// --- Long polling ---------------------------------------------------------
+// This RU host can't receive Telegram's inbound webhook (their IPs are filtered
+// both ways), so instead we PULL updates with getUpdates over our IPv6 egress —
+// a purely outbound connection, which works. Single-process only.
+
+let polling = false;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function pollLoop(): Promise<void> {
+  let offset = 0;
+  while (polling) {
+    // Long poll: Telegram holds the request up to `timeout`s, replying the instant
+    // an update arrives. The fetch timeout sits above it so a stalled socket recovers.
+    const r = await tgApi('getUpdates', { offset, timeout: 30, allowed_updates: ['message'] }, 50000);
+    if (r?.ok && Array.isArray(r.result)) {
+      for (const u of r.result) {
+        offset = u.update_id + 1;
+        if (u.message) await handleTelegramMessage(u.message);
+      }
+    } else {
+      // Network hiccup / error / timeout — back off, then resume from the same offset.
+      await sleep(5000);
+    }
+  }
+}
+
+export async function startTelegramPolling(): Promise<void> {
+  if (!telegramEnabled() || polling) return;
+  // getUpdates conflicts (409) with an active webhook; make sure none is set.
+  await tgApi('deleteWebhook', { drop_pending_updates: false });
+  polling = true;
+  console.log('🤖 Telegram bot: long-polling started');
+  pollLoop().catch((e) => {
+    polling = false;
+    console.error('tg poll loop crashed:', e);
   });
-  if (r?.ok) console.log(`🤖 Telegram webhook set: ${url}`);
-  else console.warn('⚠️ Telegram setWebhook failed:', r?.description || r);
 }
