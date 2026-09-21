@@ -86,6 +86,14 @@ services:
 networks:
   shoom:
     driver: bridge
+    # Telegram's API is reachable from this RU host ONLY over IPv6 (IPv4 to
+    # api.telegram.org is filtered). Give the bridge an IPv6 ULA so the backend
+    # can egress via NAT66 (Docker 29 sets this up automatically) — otherwise
+    # bot setWebhook/sendMessage die with "fetch failed".
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: fd00:5:0::/64
 
 volumes:
   pgdata:
