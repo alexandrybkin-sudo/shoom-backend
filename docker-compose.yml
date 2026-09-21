@@ -46,6 +46,12 @@ services:
         condition: service_healthy
     networks:
       - shoom
+      # Dedicated IPv6 egress so the backend can reach api.telegram.org (IPv4 to
+      # it is filtered on this RU host). Kept OFF the shared `shoom` network on
+      # purpose: enabling IPv6 there breaks Docker's embedded DNS for the whole
+      # stack (502s). Only the backend is multi-homed; nginx/frontend/postgres
+      # stay IPv4-only and their service discovery is unaffected.
+      - tg6
 
   livekit:
     image: livekit/livekit-server:latest
@@ -86,6 +92,13 @@ services:
 networks:
   shoom:
     driver: bridge
+  # IPv6-enabled egress network for the backend only (Telegram API is v6-only here).
+  tg6:
+    driver: bridge
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: fd00:7:0::/64
 
 volumes:
   pgdata:
