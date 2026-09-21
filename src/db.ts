@@ -9,7 +9,7 @@ export interface User {
   email: string | null;
   display_name: string;
   avatar_url: string | null;
-  google_id: string | null;
+  yandex_id: string | null;
   vk_id: string | null;
   locale: string;
   username: string | null;
@@ -24,7 +24,7 @@ export function publicUser(u: any): User {
     email: u.email ?? null,
     display_name: u.display_name,
     avatar_url: u.avatar_url ?? null,
-    google_id: u.google_id ?? null,
+    yandex_id: u.yandex_id ?? null,
     vk_id: u.vk_id ?? null,
     locale: u.locale ?? 'en',
     username: u.username ?? null,
@@ -52,6 +52,9 @@ export async function initDb(): Promise<void> {
   // Unique @username handle.
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT;`);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS users_username_uniq ON users (username);`);
+  // Yandex OAuth id (replaces Google).
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS yandex_id TEXT;`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS users_yandex_uniq ON users (yandex_id);`);
   // Profile fields.
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname_changed_at TIMESTAMPTZ;`);
