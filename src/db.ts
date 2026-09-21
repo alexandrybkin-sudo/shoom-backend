@@ -58,6 +58,10 @@ export async function initDb(): Promise<void> {
   // Telegram Login id (replaces VK).
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id TEXT;`);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS users_telegram_uniq ON users (telegram_id);`);
+  // Telegram notification bot: the chat to DM (set once the user presses Start in the
+  // bot via a deep link — Login alone does NOT grant the bot permission to message).
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_notify BOOLEAN NOT NULL DEFAULT true;`);
   // Profile fields.
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname_changed_at TIMESTAMPTZ;`);
@@ -261,6 +265,17 @@ export async function initDb(): Promise<void> {
       created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
+
+  // Short-lived nonce that ties a bot /start deep link to the account that requested
+  // it, so pressing Start in Telegram links that chat back to the right user.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS telegram_link_tokens (
+      token      TEXT PRIMARY KEY,
+      user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS telegram_link_tokens_user_idx ON telegram_link_tokens (user_id);`);
 
   console.log('🗄️  Postgres ready (users, votes, matches, tribes, forum, scheduled_battles)');
 }

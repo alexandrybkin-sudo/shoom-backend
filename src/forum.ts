@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { pool } from './db';
 import { getUserIdFromReq } from './auth';
 import { moderate, enqueuePost } from './moderation';
+import { notifyNewPost } from './telegram';
 
 // Heat weights (ticket): posts*1 + live*10 + viewers*0.5 + battles*3.
 // Implemented as a stored score bumped on events + gentle decay (cheap, non self-zeroing).
@@ -469,11 +470,15 @@ forumRouter.post('/topics/:id/posts', async (req: Request, res: Response): Promi
     return;
   }
   try {
-    const exists = await pool.query('SELECT id, lang FROM topics WHERE id = $1', [topicId]);
+    const exists = await pool.query(
+      'SELECT id, lang, title, slug, created_by FROM topics WHERE id = $1',
+      [topicId]
+    );
     if (!exists.rows[0]) {
       res.status(404).json({ error: 'topic not found' });
       return;
     }
+    const topic = exists.rows[0];
     // Writing under a different side than last time is itself an event: record the
     // switch so the thread shows "X switched blue → red" before the new post.
     const prev = await pool.query('SELECT side FROM topic_stances WHERE topic_id = $1 AND user_id = $2', [topicId, userId]);
@@ -511,6 +516,22 @@ forumRouter.post('/topics/:id/posts', async (req: Request, res: Response): Promi
        WHERE s.topic_id = $1`,
       [topicId, HEAT_POST, userId]
     );
+
+    // Ping connected users (topic author, subscribers, prior participants) via Telegram.
+    // Out of band: never block the response or fail the post if delivery hiccups.
+    void (async () => {
+      const nameRow = await pool.query('SELECT display_name FROM users WHERE id = $1', [userId]);
+      await notifyNewPost({
+        topicId,
+        topicTitle: topic.title,
+        topicSlug: topic.slug,
+        topicAuthor: topic.created_by,
+        posterId: userId,
+        posterName: nameRow.rows[0]?.display_name || 'Someone',
+        snippet: text,
+      });
+    })().catch((e) => console.error('post notify error:', e));
+
     res.json({ ok: true });
   } catch (e) {
     console.error('create post error:', e);

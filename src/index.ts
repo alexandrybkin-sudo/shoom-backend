@@ -9,6 +9,7 @@ import { randomUUID } from 'crypto';
 import { initDb, pool } from './db';
 import { authRouter, getUserIdFromReq, getUserIdFromCookieHeader } from './auth';
 import { profileRouter, UPLOADS_DIR } from './profile';
+import { telegramRouter, setTelegramWebhook, telegramEnabled } from './telegram';
 import { moderate, moderationEnabled } from './moderation';
 import {
   computeVerdict,
@@ -389,6 +390,9 @@ app.use('/api/auth', authRouter);
 
 // --- Forum Routes ---
 app.use('/api/forum', forumRouter);
+
+// --- Telegram notification bot (webhook + account linking) ---
+app.use('/api/telegram', telegramRouter);
 
 // --- Profile + account settings ---
 app.use('/api', profileRouter);
@@ -1129,5 +1133,7 @@ initDb()
           ? '🤖 AI moderation: ON (DeepSeek)'
           : '🤖 AI moderation: OFF — set DEEPSEEK_API_KEY to enable'
       );
+      if (telegramEnabled()) setTelegramWebhook().catch((e) => console.error('setWebhook:', e));
+      else console.log('🤖 Telegram bot: OFF — set TELEGRAM_BOT_TOKEN to enable');
     });
   });
