@@ -3,6 +3,7 @@ import { pool } from './db';
 import { getUserIdFromReq } from './auth';
 import { moderate, enqueuePost } from './moderation';
 import { notifyNewPost } from './telegram';
+import { maybePersonaReply } from './personas';
 
 // Heat weights (ticket): posts*1 + live*10 + viewers*0.5 + battles*3.
 // Implemented as a stored score bumped on events + gentle decay (cheap, non self-zeroing).
@@ -315,6 +316,8 @@ forumRouter.post('/topics', async (req: Request, res: Response): Promise<void> =
       `INSERT INTO topic_stats (topic_id, last_activity_at, heat_score) VALUES ($1, now(), 5)`,
       [t.rows[0].id]
     );
+    // Kick off the thread: a topic-relevant persona reacts to the thesis after a delay.
+    maybePersonaReply(t.rows[0].id, userId).catch((e) => console.error('persona trigger error:', e));
     res.json({ id: t.rows[0].id, slug: t.rows[0].slug });
   } catch (e) {
     console.error('create topic error:', e);
@@ -531,6 +534,9 @@ forumRouter.post('/topics/:id/posts', async (req: Request, res: Response): Promi
         snippet: text,
       });
     })().catch((e) => console.error('post notify error:', e));
+
+    // Let a topic-relevant AI persona reply to this (human) post after a delay.
+    maybePersonaReply(topicId, userId).catch((e) => console.error('persona trigger error:', e));
 
     res.json({ ok: true });
   } catch (e) {

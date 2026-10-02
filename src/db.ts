@@ -62,6 +62,10 @@ export async function initDb(): Promise<void> {
   // bot via a deep link — Login alone does NOT grant the bot permission to message).
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_notify BOOLEAN NOT NULL DEFAULT true;`);
+  // Demo-content + AI-persona markers (see src/personas.ts). is_seed = fake demo
+  // user/topic; is_ai = a persona that auto-replies to real humans' posts.
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_seed BOOLEAN NOT NULL DEFAULT false;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_ai BOOLEAN NOT NULL DEFAULT false;`);
   // Profile fields.
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname_changed_at TIMESTAMPTZ;`);

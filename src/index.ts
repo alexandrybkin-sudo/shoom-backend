@@ -10,6 +10,7 @@ import { initDb, pool } from './db';
 import { authRouter, getUserIdFromReq, getUserIdFromCookieHeader } from './auth';
 import { profileRouter, UPLOADS_DIR } from './profile';
 import { telegramRouter, startTelegramPolling, telegramEnabled } from './telegram';
+import { ensurePersonas } from './personas';
 import { moderate, moderationEnabled } from './moderation';
 import {
   computeVerdict,
@@ -1122,6 +1123,7 @@ setInterval(async () => {
 
 initDb()
   .then(() => seedForum())
+  .then(() => ensurePersonas())
   .catch((e) => console.error('⚠️ DB init/seed failed (continuing):', e))
   .finally(() => {
     startHeatCron();
