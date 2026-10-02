@@ -17,8 +17,11 @@ const MIN_DELAY = Number(process.env.PERSONA_MIN_DELAY_MS || 25_000);
 const MAX_DELAY = Number(process.env.PERSONA_MAX_DELAY_MS || 150_000);
 // Chance a human post gets any persona reply at all (not every post does).
 const REPLY_CHANCE = Number(process.env.PERSONA_REPLY_CHANCE || 0.9);
-// Small chance a SECOND persona also chimes in a bit later.
-const SECOND_CHANCE = Number(process.env.PERSONA_SECOND_CHANCE || 0.25);
+// How many personas chime in: always ≥1, then a 2nd/3rd with these chances.
+const SECOND_CHANCE = Number(process.env.PERSONA_SECOND_CHANCE || 0.5);
+const THIRD_CHANCE = Number(process.env.PERSONA_THIRD_CHANCE || 0.25);
+// Chance a given reply targets the human who just posted (vs another participant).
+const HUMAN_TARGET_CHANCE = Number(process.env.PERSONA_HUMAN_TARGET_CHANCE || 0.6);
 
 interface Persona {
   username: string; // reuse existing seed handles so they already have history
@@ -113,51 +116,63 @@ export async function maybePersonaReply(topicId: number, posterUserId: string): 
     const topic = t.rows[0];
     if (!topic) return;
 
-    // The message we reply TO: the triggering human's own latest post in this topic,
-    // captured now so the persona answers THEM, not some older post. Null on a fresh
-    // topic (created, no post yet) — then the persona reacts to the thesis.
-    const trg = await pool.query(
-      `SELECT u.display_name AS nick, p.side, p.body
+    // Recent messages = candidate targets to reply to. The triggering human's own
+    // latest post is the "human target"; everyone else's are "other targets" so a
+    // persona can answer another participant, not always the person who just posted.
+    const recent = await pool.query(
+      `SELECT p.user_id AS uid, u.display_name AS nick, p.side, p.body
          FROM topic_posts p JOIN users u ON u.id = p.user_id
-        WHERE p.topic_id = $1 AND p.user_id = $2 AND p.kind = 'post' AND p.body <> ''
-        ORDER BY p.created_at DESC LIMIT 1`,
-      [topicId, posterUserId]
-    );
-    const target: Target | null = trg.rows[0]
-      ? { nick: trg.rows[0].nick, side: trg.rows[0].side, body: trg.rows[0].body }
-      : null;
-
-    // Eligible = personas whose interests include this category and who aren't the
-    // most recent poster (avoid double-posting in a row).
-    const lastPoster = await pool.query(
-      'SELECT user_id FROM topic_posts WHERE topic_id = $1 ORDER BY created_at DESC LIMIT 1',
+        WHERE p.topic_id = $1 AND p.hidden_at IS NULL AND p.kind = 'post' AND p.body <> ''
+        ORDER BY p.created_at DESC LIMIT 12`,
       [topicId]
     );
-    const lastPosterId = lastPoster.rows[0]?.user_id;
-    let pool_ = PERSONAS.filter(
+    const toTarget = (r: any): Target => ({ nick: r.nick, side: r.side, body: r.body });
+    const humanRow = recent.rows.find((r) => r.uid === posterUserId);
+    const humanTarget: Target | null = humanRow ? toTarget(humanRow) : null;
+    const otherTargets: Target[] = recent.rows.filter((r) => r.uid !== posterUserId).map(toTarget);
+
+    // Eligible = personas in this category, excluding the most recent poster
+    // (so a persona doesn't answer right after itself).
+    const lastPosterId = recent.rows[0]?.uid;
+    const eligible = PERSONAS.filter(
       (p) => p.interests.includes(topic.category) && idByUsername.get(p.username) !== lastPosterId
     );
-    if (!pool_.length) return;
+    if (!eligible.length) return;
     if (Math.random() > REPLY_CHANCE) return;
 
     lastReplyAt.set(topicId, Date.now());
-    const first = pool_[Math.floor(Math.random() * pool_.length)];
-    scheduleReply(first, topic, target, randDelay());
 
-    // Occasionally a second, different persona also jumps in a bit later.
-    if (Math.random() < SECOND_CHANCE) {
-      const rest = pool_.filter((p) => p.username !== first.username);
-      if (rest.length) {
-        const second = rest[Math.floor(Math.random() * rest.length)];
-        scheduleReply(second, topic, target, randDelay() + 30_000 + Math.random() * 90_000);
-      }
-    }
+    // How many personas jump in: always ≥1, sometimes 2 or 3.
+    let n = 1;
+    if (Math.random() < SECOND_CHANCE) n = 2;
+    if (n === 2 && Math.random() < THIRD_CHANCE) n = 3;
+    n = Math.min(n, eligible.length);
+
+    const chosen = shuffle(eligible).slice(0, n);
+    chosen.forEach((persona, i) => {
+      // 60% answer the human who just posted; otherwise another participant (if any).
+      const pickHuman = humanTarget && (!otherTargets.length || Math.random() < HUMAN_TARGET_CHANCE);
+      const target = pickHuman
+        ? humanTarget
+        : otherTargets.length
+          ? otherTargets[Math.floor(Math.random() * otherTargets.length)]
+          : humanTarget;
+      scheduleReply(persona, topic, target, randDelay() + i * (25_000 + Math.random() * 95_000));
+    });
   } catch (e) {
     console.error('maybePersonaReply error:', e);
   }
 }
 
 const randDelay = () => MIN_DELAY + Math.random() * Math.max(0, MAX_DELAY - MIN_DELAY);
+function shuffle<T>(arr: T[]): T[] {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
 
 interface TopicRow { id: number; title: string; slug: string; a: string; b: string; created_by: string | null; category: string; }
 interface Target { nick: string; side: string; body: string; }
