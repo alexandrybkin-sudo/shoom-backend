@@ -113,6 +113,20 @@ export async function maybePersonaReply(topicId: number, posterUserId: string): 
     const topic = t.rows[0];
     if (!topic) return;
 
+    // The message we reply TO: the triggering human's own latest post in this topic,
+    // captured now so the persona answers THEM, not some older post. Null on a fresh
+    // topic (created, no post yet) — then the persona reacts to the thesis.
+    const trg = await pool.query(
+      `SELECT u.display_name AS nick, p.side, p.body
+         FROM topic_posts p JOIN users u ON u.id = p.user_id
+        WHERE p.topic_id = $1 AND p.user_id = $2 AND p.kind = 'post' AND p.body <> ''
+        ORDER BY p.created_at DESC LIMIT 1`,
+      [topicId, posterUserId]
+    );
+    const target: Target | null = trg.rows[0]
+      ? { nick: trg.rows[0].nick, side: trg.rows[0].side, body: trg.rows[0].body }
+      : null;
+
     // Eligible = personas whose interests include this category and who aren't the
     // most recent poster (avoid double-posting in a row).
     const lastPoster = await pool.query(
@@ -128,14 +142,14 @@ export async function maybePersonaReply(topicId: number, posterUserId: string): 
 
     lastReplyAt.set(topicId, Date.now());
     const first = pool_[Math.floor(Math.random() * pool_.length)];
-    scheduleReply(first, topic, randDelay());
+    scheduleReply(first, topic, target, randDelay());
 
     // Occasionally a second, different persona also jumps in a bit later.
     if (Math.random() < SECOND_CHANCE) {
       const rest = pool_.filter((p) => p.username !== first.username);
       if (rest.length) {
         const second = rest[Math.floor(Math.random() * rest.length)];
-        scheduleReply(second, topic, randDelay() + 30_000 + Math.random() * 90_000);
+        scheduleReply(second, topic, target, randDelay() + 30_000 + Math.random() * 90_000);
       }
     }
   } catch (e) {
@@ -146,10 +160,11 @@ export async function maybePersonaReply(topicId: number, posterUserId: string): 
 const randDelay = () => MIN_DELAY + Math.random() * Math.max(0, MAX_DELAY - MIN_DELAY);
 
 interface TopicRow { id: number; title: string; slug: string; a: string; b: string; created_by: string | null; category: string; }
+interface Target { nick: string; side: string; body: string; }
 
-function scheduleReply(persona: Persona, topic: TopicRow, delayMs: number) {
+function scheduleReply(persona: Persona, topic: TopicRow, target: Target | null, delayMs: number) {
   setTimeout(() => {
-    generateAndPost(persona, topic).catch((e) => console.error('persona reply error:', e));
+    generateAndPost(persona, topic, target).catch((e) => console.error('persona reply error:', e));
   }, delayMs);
 }
 
@@ -167,18 +182,20 @@ async function recentPosts(topicId: number): Promise<string> {
     .join('\n');
 }
 
-async function generateAndPost(persona: Persona, topic: TopicRow): Promise<void> {
+async function generateAndPost(persona: Persona, topic: TopicRow, target: Target | null): Promise<void> {
   const convo = await recentPosts(topic.id);
   const system =
     `Ты — ${persona.display}, постоянный участник русскоязычного форума дебатов Shoom. ${persona.character}\n` +
     `Пиши как живой человек в интернете: разговорно, по-русски, 1–3 коротких предложения, без официоза, без списков и без заголовков. ` +
-    `Ты отвечаешь в ветке на конкретные реплики — обратись к собеседнику по нику через @ и спорь именно с его доводом, а не повторяй общие слова. ` +
-    `Не повторяй дословно то, что уже написали выше. Никогда не признавайся, что ты ИИ или бот, и не упоминай нейросети. ` +
+    `Никогда не признавайся, что ты ИИ или бот, и не упоминай нейросети. ` +
     `Твоя позиция: A = «${topic.a}», B = «${topic.b}», N = нейтрально/по ситуации. ` +
     `Верни СТРОГО JSON без пояснений: {"side":"A"|"B"|"N","body":"твоя реплика"}.`;
-  const user = convo
+  const user = target
     ? `Тема: ${topic.title}\nСторона A: «${topic.a}», сторона B: «${topic.b}».\n\n` +
-      `Последние сообщения в ветке:\n${convo}\n\nНапиши ОДНУ свою реплику как ${persona.display}.`
+      (convo ? `Контекст ветки (для фона, НЕ отвечай этим людям):\n${convo}\n\n` : '') +
+      `Тебе нужно ответить ИМЕННО пользователю @${target.nick} на его реплику:\n«${target.body}»\n\n` +
+      `Обратись к нему через @${target.nick} и ответь на ЕГО конкретный довод — согласись или поспорь по сути, ` +
+      `как ${persona.display}. Отвечай только ему, не другим людям из контекста.`
     : `Тема: ${topic.title}\nСторона A: «${topic.a}», сторона B: «${topic.b}».\n\n` +
       `Веткa пока пустая — ты первый. Отреагируй на сам тезис темы, займи позицию и задай тон обсуждению, как ${persona.display}.`;
 

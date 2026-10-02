@@ -237,6 +237,8 @@ forumRouter.get('/categories/:slug', async (req: Request, res: Response): Promis
 forumRouter.get('/topics/:slug', async (req: Request, res: Response): Promise<void> => {
   const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
   const pageSize = 20;
+  // Message order: oldest-first (default) or newest-first.
+  const order = String(req.query.sort) === 'new' ? 'DESC' : 'ASC';
   try {
     const t = await pool.query(
       `SELECT t.id, t.slug, t.title, t.lang, t.side_a_label AS "sideA", t.side_b_label AS "sideB",
@@ -258,7 +260,7 @@ forumRouter.get('/topics/:slug', async (req: Request, res: Response): Promise<vo
               u.display_name AS "author", u.username AS "authorHandle", u.avatar_url AS "avatar"
        FROM topic_posts p JOIN users u ON u.id = p.user_id
        WHERE p.topic_id = $1 AND p.hidden_at IS NULL
-       ORDER BY p.created_at ASC
+       ORDER BY p.created_at ${order}
        LIMIT $2 OFFSET $3`,
       [topic.id, pageSize, (page - 1) * pageSize]
     );
