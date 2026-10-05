@@ -11,6 +11,7 @@ import { authRouter, getUserIdFromReq, getUserIdFromCookieHeader } from './auth'
 import { profileRouter, UPLOADS_DIR } from './profile';
 import { telegramRouter, startTelegramPolling, telegramEnabled } from './telegram';
 import { ensurePersonas } from './personas';
+import { coachRouter } from './coach';
 import { moderate, moderationEnabled } from './moderation';
 import {
   computeVerdict,
@@ -394,6 +395,9 @@ app.use('/api/forum', forumRouter);
 
 // --- Telegram notification bot (long polling + account linking) ---
 app.use('/api/telegram', telegramRouter);
+
+// --- AI debate coach ---
+app.use('/api/coach', coachRouter);
 
 // --- Profile + account settings ---
 app.use('/api', profileRouter);
