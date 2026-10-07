@@ -241,7 +241,7 @@ async function generateAndPost(persona: Persona, topic: TopicRow, target: Target
   // (the model is told, and the side is enforced) — no flip-flopping between posts.
   const prior = await pool.query(
     `SELECT side, body FROM topic_posts
-      WHERE topic_id = $1 AND user_id = $2 AND kind = 'post' AND body <> ''
+      WHERE topic_id = $1 AND user_id = $2 AND kind = 'post' AND body <> '' AND hidden_at IS NULL
       ORDER BY created_at DESC LIMIT 1`,
     [topic.id, userId]
   );
