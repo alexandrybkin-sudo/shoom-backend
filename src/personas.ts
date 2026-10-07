@@ -92,6 +92,10 @@ export async function ensurePersonas(): Promise<void> {
 // Simple per-topic cooldown so a human spamming can't fan out many LLM calls.
 const lastReplyAt = new Map<number, number>();
 const COOLDOWN_MS = 20_000;
+// Personas scheduled but not yet posted, per topic. While a batch is in flight we
+// don't start another one (topic creation + the author's first post used to fire
+// two batches seconds apart, so the same persona answered twice).
+const pending = new Map<number, Set<string>>();
 
 /**
  * Called after a human posts in a topic. Picks topic-relevant persona(s) and
@@ -107,6 +111,9 @@ export async function maybePersonaReply(topicId: number, posterUserId: string): 
 
     const last = lastReplyAt.get(topicId) || 0;
     if (Date.now() - last < COOLDOWN_MS) return;
+    // A batch is already queued for this topic — it will answer the latest human
+    // post when it fires, so don't stack a second one.
+    if (pending.get(topicId)?.size) return;
 
     const t = await pool.query(
       `SELECT t.id, t.title, t.slug, t.side_a_label AS a, t.side_b_label AS b, t.created_by, c.slug AS category
@@ -131,11 +138,11 @@ export async function maybePersonaReply(topicId: number, posterUserId: string): 
     const humanTarget: Target | null = humanRow ? toTarget(humanRow) : null;
     const otherTargets: Target[] = recent.rows.filter((r) => r.uid !== posterUserId).map(toTarget);
 
-    // Eligible = personas in this category, excluding the most recent poster
-    // (so a persona doesn't answer right after itself).
-    const lastPosterId = recent.rows[0]?.uid;
+    // Eligible = personas in this category, excluding anyone among the last 3
+    // posters (no monologues / back-to-back replies from one nick).
+    const recentPosterIds = new Set(recent.rows.slice(0, 3).map((r) => r.uid));
     const eligible = PERSONAS.filter(
-      (p) => p.interests.includes(topic.category) && idByUsername.get(p.username) !== lastPosterId
+      (p) => p.interests.includes(topic.category) && !recentPosterIds.has(idByUsername.get(p.username))
     );
     if (!eligible.length) return;
     if (Math.random() > REPLY_CHANCE) return;
@@ -178,8 +185,17 @@ interface TopicRow { id: number; title: string; slug: string; a: string; b: stri
 interface Target { nick: string; side: string; body: string; }
 
 function scheduleReply(persona: Persona, topic: TopicRow, target: Target | null, delayMs: number) {
+  const set = pending.get(topic.id) ?? new Set<string>();
+  set.add(persona.username);
+  pending.set(topic.id, set);
   setTimeout(() => {
-    generateAndPost(persona, topic, target).catch((e) => console.error('persona reply error:', e));
+    generateAndPost(persona, topic, target)
+      .catch((e) => console.error('persona reply error:', e))
+      .finally(() => {
+        const s = pending.get(topic.id);
+        s?.delete(persona.username);
+        if (s && !s.size) pending.delete(topic.id);
+      });
   }, delayMs);
 }
 
@@ -198,12 +214,51 @@ async function recentPosts(topicId: number): Promise<string> {
 }
 
 async function generateAndPost(persona: Persona, topic: TopicRow, target: Target | null): Promise<void> {
+  const userId = idByUsername.get(persona.username);
+  if (!userId) return;
+
+  // Safety: never post twice in a row from the same nick.
+  const lastRow = await pool.query(
+    `SELECT user_id FROM topic_posts WHERE topic_id = $1 AND hidden_at IS NULL ORDER BY created_at DESC LIMIT 1`,
+    [topic.id]
+  );
+  if (lastRow.rows[0]?.user_id === userId) return;
+
+  // Scheduled on a fresh topic (no target) but a human has posted since — answer
+  // that post instead of the bare thesis.
+  if (!target) {
+    const h = await pool.query(
+      `SELECT u.display_name AS nick, p.side, p.body
+         FROM topic_posts p JOIN users u ON u.id = p.user_id
+        WHERE p.topic_id = $1 AND p.hidden_at IS NULL AND p.kind = 'post' AND p.body <> '' AND NOT u.is_ai
+        ORDER BY p.created_at DESC LIMIT 1`,
+      [topic.id]
+    );
+    if (h.rows[0]) target = { nick: h.rows[0].nick, side: h.rows[0].side, body: h.rows[0].body };
+  }
+
+  // Stance memory: if this persona already spoke in the thread, it keeps that side
+  // (the model is told, and the side is enforced) — no flip-flopping between posts.
+  const prior = await pool.query(
+    `SELECT side, body FROM topic_posts
+      WHERE topic_id = $1 AND user_id = $2 AND kind = 'post' AND body <> ''
+      ORDER BY created_at DESC LIMIT 1`,
+    [topic.id, userId]
+  );
+  const lockedSide: string | null = prior.rows[0]?.side ?? null;
+  const sideName = (s: string) => (s === 'A' ? `«${topic.a}»` : s === 'B' ? `«${topic.b}»` : 'нейтральной');
+  const stanceNote = lockedSide
+    ? `Ты уже писал в этой ветке: «${String(prior.rows[0].body).slice(0, 300)}». Твоя позиция — ${sideName(lockedSide)}, держись её: ` +
+      `не меняй сторону, не противоречь себе и не повторяй уже сказанное. В JSON поставь "side":"${lockedSide}". `
+    : '';
+
   const convo = await recentPosts(topic.id);
   const system =
     `Ты — ${persona.display}, постоянный участник русскоязычного форума дебатов Shoom. ${persona.character}\n` +
     `Пиши как живой человек в интернете: разговорно, по-русски, 1–3 коротких предложения, без официоза, без списков и без заголовков. ` +
     `Никогда не признавайся, что ты ИИ или бот, и не упоминай нейросети. ` +
     `Твоя позиция: A = «${topic.a}», B = «${topic.b}», N = нейтрально/по ситуации. ` +
+    stanceNote +
     `Верни СТРОГО JSON без пояснений: {"side":"A"|"B"|"N","body":"твоя реплика"}.`;
   const user = target
     ? `Тема: ${topic.title}\nСторона A: «${topic.a}», сторона B: «${topic.b}».\n\n` +
@@ -237,7 +292,7 @@ async function generateAndPost(persona: Persona, topic: TopicRow, target: Target
     if (!res.ok) throw new Error(`deepseek ${res.status}`);
     const data = await res.json();
     const parsed = JSON.parse(data.choices?.[0]?.message?.content || '{}');
-    side = ['A', 'B', 'N'].includes(parsed.side) ? parsed.side : 'N';
+    side = lockedSide ?? (['A', 'B', 'N'].includes(parsed.side) ? parsed.side : 'N');
     body = String(parsed.body || '').trim().replace(/^["«»]+|["«»]+$/g, '').slice(0, 600);
   } catch (e) {
     console.error(`persona ${persona.username} generation failed:`, e);
@@ -246,9 +301,6 @@ async function generateAndPost(persona: Persona, topic: TopicRow, target: Target
     clearTimeout(timer);
   }
   if (!body) return;
-
-  const userId = idByUsername.get(persona.username);
-  if (!userId) return;
 
   // Insert the reply directly (trusted content, bypasses the human moderation gate).
   await pool.query(
